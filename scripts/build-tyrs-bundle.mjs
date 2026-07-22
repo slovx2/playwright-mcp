@@ -13,6 +13,8 @@ const coreArtifact = resolve(coreArgument);
 const outputRoot = resolve(outputArgument);
 const temporary = await mkdtemp(join(tmpdir(), 'tyrs-browser-bridge-'));
 const stageRoot = join(temporary, 'tyrs-browser-bridge');
+const revision = run('git', ['rev-parse', 'HEAD'], repositoryRoot).trim();
+const dirty = Boolean(run('git', ['status', '--porcelain'], repositoryRoot).trim());
 
 try {
   await mkdir(stageRoot, { recursive: true });
@@ -36,8 +38,6 @@ try {
   await mkdir(outputRoot, { recursive: true });
   const bundlePath = join(outputRoot, 'tyrs-browser-bridge-bundle.tgz');
   run('tar', ['-czf', bundlePath, '-C', temporary, 'tyrs-browser-bridge'], repositoryRoot);
-  const revision = run('git', ['rev-parse', 'HEAD'], repositoryRoot).trim();
-  const dirty = Boolean(run('git', ['status', '--porcelain'], repositoryRoot).trim());
   await writeFile(join(outputRoot, 'bridge-artifact.json'), `${JSON.stringify({
     repository: 'https://github.com/slovx2/playwright-mcp',
     revision,

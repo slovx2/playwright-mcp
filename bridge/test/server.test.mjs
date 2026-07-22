@@ -11,7 +11,7 @@ test('health is public while MCP requires a bearer token', async () => {
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
-    assert.equal(health.bridgeVersion, '0.1.1');
+    assert.equal(health.bridgeVersion, '0.1.2');
     assert.equal((await fetch(bridge.url('/mcp'), { method: 'POST' })).status, 401);
     assert.equal((await fetch(bridge.url('/mcp'), {
       method: 'POST', headers: { authorization: 'Bearer wrong' },

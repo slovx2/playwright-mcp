@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { allowedClient, isLoopback, parseAllowedCIDRs } from './network.mjs';
 
-const bridgeVersion = '0.1.1';
+const bridgeVersion = '0.1.2';
 const publicHost = process.env.TYRS_BROWSER_MCP_HOST || '0.0.0.0';
 const publicPort = parsePort(process.env.TYRS_BROWSER_MCP_PORT, 8931);
 const relayPort = parsePort(process.env.TYRS_BROWSER_RELAY_PORT, 8932);
