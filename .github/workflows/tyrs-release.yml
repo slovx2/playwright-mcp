@@ -19,10 +19,10 @@ jobs:
       - name: Download pinned Playwright Core artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PLAYWRIGHT_RELEASE_TAG: tyrs-v0.1.0
         run: |
           install -d "${RUNNER_TEMP}/tyrs-playwright"
-          gh release download "$RELEASE_TAG" \
+          gh release download "$PLAYWRIGHT_RELEASE_TAG" \
             --repo slovx2/playwright \
             --pattern playwright-core.tgz \
             --dir "${RUNNER_TEMP}/tyrs-playwright"
