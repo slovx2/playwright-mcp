@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { allowedClient, isLoopback, parseAllowedCIDRs } from './network.mjs';
 
-const bridgeVersion = '0.1.2';
+const bridgeVersion = '0.1.3';
 const publicHost = process.env.TYRS_BROWSER_MCP_HOST || '0.0.0.0';
 const publicPort = parsePort(process.env.TYRS_BROWSER_MCP_PORT, 8931);
 const relayPort = parsePort(process.env.TYRS_BROWSER_RELAY_PORT, 8932);
@@ -57,6 +57,15 @@ const server = http.createServer(async (request, response) => {
       return sendJSON(response, 200, healthPayload());
     if (pathname === '/extension-status' && request.method === 'POST')
       return await receiveExtensionStatus(request, response);
+    if (pathname === '/extension/config' && request.method === 'GET') {
+      if (!isLoopback(request.socket.remoteAddress))
+        return sendJSON(response, 403, { error: 'extension configuration requires loopback' });
+      return sendJSON(response, 200, {
+        relayUrl: `ws://127.0.0.1:${relayPort}/extension`,
+        statusUrl: `http://127.0.0.1:${publicPort}/extension-status`,
+        extensionToken,
+      }, { 'access-control-allow-origin': `chrome-extension://${extensionId}` });
+    }
     if (pathname === '/extension/update.xml' && request.method === 'GET')
       return await serveUpdateManifest(response);
     if (pathname === '/extension/tyrs-browser.crx' && request.method === 'GET')
@@ -161,12 +170,13 @@ function authorized(header, token) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-function sendJSON(response, status, body) {
+function sendJSON(response, status, body, extraHeaders = {}) {
   const data = body === undefined ? '' : JSON.stringify(body);
   response.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(data),
     'cache-control': 'no-store',
+    ...extraHeaders,
   });
   response.end(data);
 }

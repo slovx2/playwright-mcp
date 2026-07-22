@@ -11,7 +11,7 @@ test('health is public while MCP requires a bearer token', async () => {
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
-    assert.equal(health.bridgeVersion, '0.1.2');
+    assert.equal(health.bridgeVersion, '0.1.3');
     assert.equal((await fetch(bridge.url('/mcp'), { method: 'POST' })).status, 401);
     assert.equal((await fetch(bridge.url('/mcp'), {
       method: 'POST', headers: { authorization: 'Bearer wrong' },
@@ -67,6 +67,24 @@ test('extension status requires loopback token and drives health state', async (
   }
 });
 
+test('extension configuration is loopback bootstrap with separate token and no-store response', async () => {
+  const bridge = await startBridge();
+  try {
+    const response = await fetch(bridge.url('/extension/config?source=managed-fallback'));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('access-control-allow-origin'),
+        'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.deepEqual(await response.json(), {
+      relayUrl: `ws://127.0.0.1:${bridge.relayPort}/extension`,
+      statusUrl: `http://127.0.0.1:${bridge.publicPort}/extension-status`,
+      extensionToken: 'extension-secret',
+    });
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('extension release endpoints validate and serve locked artifacts', async () => {
   const bridge = await startBridge({ release: true });
   try {
@@ -101,6 +119,8 @@ async function startBridge(options = {}) {
   });
   await waitForHealth(`http://127.0.0.1:${fixture.publicPort}/health`);
   return {
+    publicPort: fixture.publicPort,
+    relayPort: fixture.relayPort,
     url: path => `http://127.0.0.1:${fixture.publicPort}${path}`,
     relayURL: `ws://127.0.0.1:${fixture.relayPort}`,
     close: async () => {

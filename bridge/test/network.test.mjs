@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { allowedClient, discoverDockerHostAddresses, parseAllowedCIDRs } from '../src/network.mjs';
+import { allowedClient, discoverDockerHostAddresses, isLoopback, parseAllowedCIDRs } from '../src/network.mjs';
 
 const interfaces = {
   lo: [{ family: 'IPv4', address: '127.0.0.1' }],
@@ -27,6 +27,9 @@ test('network access rejects LAN destinations and clients outside configured CID
       cidrs, interfaces), false);
   assert.equal(allowedClient({ remoteAddress: '::1:bad', localAddress: '172.20.0.1' },
       cidrs, interfaces), false);
+  assert.equal(isLoopback('172.20.0.8'), false);
+  assert.equal(isLoopback('192.168.1.10'), false);
+  assert.equal(isLoopback('100.64.0.1'), false);
 });
 
 test('invalid CIDR configuration fails closed at startup', () => {
