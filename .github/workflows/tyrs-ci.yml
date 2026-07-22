@@ -1,32 +1,37 @@
-name: Tyrs browser bridge artifact
+name: Tyrs browser bridge CI
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.1.0
 
 jobs:
-  release:
-    if: startsWith(github.event.release.tag_name, 'tyrs-v')
+  test:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.14.0
-      - name: Download pinned Playwright Core artifact
+          cache: npm
+      - run: npm ci
+      - name: Download released Playwright Core
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           install -d "${RUNNER_TEMP}/tyrs-playwright"
-          gh release download "$RELEASE_TAG" \
+          gh release download "$TYRS_PLAYWRIGHT_RELEASE" \
             --repo slovx2/playwright \
             --pattern playwright-core.tgz \
             --dir "${RUNNER_TEMP}/tyrs-playwright"
-      - name: Build self-contained bridge bundle
+      - name: Test and package Bridge
         run: |
           npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund \
             "${RUNNER_TEMP}/tyrs-playwright/playwright-core.tgz"
@@ -34,12 +39,3 @@ jobs:
           node scripts/build-tyrs-bundle.mjs \
             "${RUNNER_TEMP}/tyrs-playwright/playwright-core.tgz" \
             out/tyrs-browser-bridge
-      - name: Upload release artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          gh release upload "$RELEASE_TAG" \
-            out/tyrs-browser-bridge/tyrs-browser-bridge-bundle.tgz \
-            out/tyrs-browser-bridge/bridge-artifact.json \
-            --clobber
