@@ -1,20 +1,21 @@
 {
-  "name": "@playwright/mcp",
-  "version": "0.0.78",
-  "description": "Playwright Tools for MCP",
+  "name": "@tyrs-hand/playwright-mcp",
+  "version": "0.1.0",
+  "description": "Tyrs Browser Bridge and Playwright MCP distribution",
+  "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/microsoft/playwright-mcp.git"
+    "url": "git+https://github.com/slovx2/playwright-mcp.git"
   },
-  "homepage": "https://playwright.dev",
+  "homepage": "https://github.com/slovx2/playwright-mcp",
   "engines": {
     "node": ">=18"
   },
   "author": {
-    "name": "Microsoft Corporation"
+    "name": "Tyrs Hand contributors"
   },
   "license": "Apache-2.0",
-  "mcpName": "io.github.microsoft/playwright-mcp",
+  "mcpName": "io.github.slovx2/tyrs-browser-bridge",
   "scripts": {
     "lint": "node update-readme.js",
     "test": "playwright test",
@@ -23,6 +24,9 @@
     "wtest": "playwright test --project=webkit",
     "dtest": "MCP_IN_DOCKER=1 playwright test --project=chromium-docker",
     "build": "echo OK",
+    "bridge:start": "node bridge/src/server.mjs",
+    "bridge:test": "node --test bridge/test/*.test.mjs",
+    "build-tyrs-bundle": "node scripts/build-tyrs-bundle.mjs",
     "npm-publish": "npm run lint && npm run test && npm publish",
     "docker-build": "docker build --no-cache -t playwright-mcp-dev:latest .",
     "docker-rm": "docker rm playwright-mcp-dev",
@@ -37,13 +41,12 @@
     }
   },
   "dependencies": {
-    "playwright": "1.62.0-alpha-1783623505000",
     "playwright-core": "1.62.0-alpha-1783623505000"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@modelcontextprotocol/sdk": "1.25.2",
     "@playwright/test": "1.62.0-alpha-1783623505000",
-    "@types/node": "^24.3.0"
+    "@types/node": "24.3.0"
   },
   "bin": {
     "playwright-mcp": "cli.js"

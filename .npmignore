@@ -4,3 +4,4 @@
 !cli.js
 !index.*
 !config.d.ts
+!bridge/src/**
