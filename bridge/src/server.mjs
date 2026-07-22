@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { allowedClient, isLoopback, parseAllowedCIDRs } from './network.mjs';
 
-const bridgeVersion = '0.1.0';
+const bridgeVersion = '0.1.1';
 const publicHost = process.env.TYRS_BROWSER_MCP_HOST || '0.0.0.0';
 const publicPort = parsePort(process.env.TYRS_BROWSER_MCP_PORT, 8931);
 const relayPort = parsePort(process.env.TYRS_BROWSER_RELAY_PORT, 8932);
@@ -52,13 +52,14 @@ const server = http.createServer(async (request, response) => {
   try {
     if (!allowedClient(request.socket, allowedCIDRs))
       return sendJSON(response, 403, { error: 'network is not allowed' });
-    if (request.url === '/health' && request.method === 'GET')
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (pathname === '/health' && request.method === 'GET')
       return sendJSON(response, 200, healthPayload());
-    if (request.url === '/extension-status' && request.method === 'POST')
+    if (pathname === '/extension-status' && request.method === 'POST')
       return await receiveExtensionStatus(request, response);
-    if (request.url === '/extension/update.xml' && request.method === 'GET')
+    if (pathname === '/extension/update.xml' && request.method === 'GET')
       return await serveUpdateManifest(response);
-    if (request.url === '/extension/tyrs-browser.crx' && request.method === 'GET')
+    if (pathname === '/extension/tyrs-browser.crx' && request.method === 'GET')
       return await serveCRX(response);
     if (!authorized(request.headers.authorization, mcpToken))
       return sendJSON(response, 401, { error: 'unauthorized' });

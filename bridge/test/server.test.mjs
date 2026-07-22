@@ -11,6 +11,7 @@ test('health is public while MCP requires a bearer token', async () => {
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
+    assert.equal(health.bridgeVersion, '0.1.1');
     assert.equal((await fetch(bridge.url('/mcp'), { method: 'POST' })).status, 401);
     assert.equal((await fetch(bridge.url('/mcp'), {
       method: 'POST', headers: { authorization: 'Bearer wrong' },
@@ -69,15 +70,16 @@ test('extension status requires loopback token and drives health state', async (
 test('extension release endpoints validate and serve locked artifacts', async () => {
   const bridge = await startBridge({ release: true });
   try {
-    const manifest = await fetch(bridge.url('/extension/update.xml'));
+    const manifest = await fetch(bridge.url('/extension/update.xml?os=linux&x=installedby%3Dpolicy'));
     assert.equal(manifest.status, 200);
     const xml = await manifest.text();
     assert.match(xml, /appid="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/);
     assert.match(xml, /version="0.1.0"/);
-    const crx = await fetch(bridge.url('/extension/tyrs-browser.crx'));
+    const crx = await fetch(bridge.url('/extension/tyrs-browser.crx?uc'));
     assert.equal(crx.status, 200);
     assert.equal(crx.headers.get('content-type'), 'application/x-chrome-extension');
     assert.deepEqual(Buffer.from(await crx.arrayBuffer()), Buffer.from('test-crx'));
+    assert.equal((await fetch(bridge.url('/mcp?session=test'), { method: 'POST' })).status, 401);
   } finally {
     await bridge.close();
   }
