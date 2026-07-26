@@ -17,7 +17,9 @@ const temporary = await mkdtemp(join(tmpdir(), 'tyrs-browser-agent-'));
 const lock = JSON.parse(await readFile(join(root, 'agent/runtime-lock.json'), 'utf8'));
 const agentPackage = JSON.parse(await readFile(join(root, 'agent/package.json'), 'utf8'));
 const revision = run('git', ['rev-parse', 'HEAD'], root).trim();
-const dirty = Boolean(run('git', ['status', '--porcelain'], root).trim());
+const dirty = Boolean(run('git', [
+  'status', '--porcelain', '--', '.', ':(exclude)out', ':(exclude)agent/lib',
+], root).trim());
 if (!/^\d+(\.\d+){0,3}$/.test(playwrightManifest.extensionVersion))
   throw new Error('invalid extension version in Playwright artifact manifest');
 

@@ -1,6 +1,6 @@
 {
   "name": "@tyrs-hand/playwright-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tyrs Browser Bridge and Playwright MCP distribution",
   "private": true,
   "repository": {
