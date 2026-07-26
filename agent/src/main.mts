@@ -52,6 +52,7 @@ const publicServer = http.createServer(async (request, response) => {
       if (!authorized(request.headers.authorization, config.extensionToken))
         return sendJSON(response, 401, { error: 'unauthorized' });
       const body = await readJSON(request, 64 * 1024);
+      const wasConnected = extensionStatus.connected;
       extensionStatus = {
         connected: body.connected === true,
         tabCount: Number(body.tabCount || 0),
@@ -59,6 +60,8 @@ const publicServer = http.createServer(async (request, response) => {
         chromeVersion: String(body.chromeVersion || ''),
       };
       await sendStatus().catch(error => log(error));
+      if (!extensionStatus.connected && (wasConnected || relayConnected))
+        void restartRelay().catch(error => log(error));
       return sendJSON(response, 204);
     }
     if (url.pathname === '/extension/update.xml') {
@@ -138,10 +141,16 @@ async function restartRelay() {
     });
     relaySession = { server, relay, downloads };
     void relay.establishExtensionConnection('Tyrs Desktop Browser Agent').then(async () => {
+      if (relaySession?.relay !== relay)
+        return;
       relayConnected = true;
       extensionStatus.connected = true;
       await sendStatus().catch(error => log(error));
-    }).catch(error => log(error));
+    }).catch(async error => {
+      log(error);
+      if (relaySession?.relay === relay)
+        await restartRelay();
+    });
   })().finally(() => restartingRelay = undefined);
   return await restartingRelay;
 }

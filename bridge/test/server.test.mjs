@@ -12,7 +12,7 @@ test('health is public while MCP requires a bearer token', async () => {
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
-    assert.equal(health.bridgeVersion, '0.2.1');
+    assert.equal(health.bridgeVersion, '0.2.2');
     const agentHealth = await waitForAgentHealth(bridge.url('/health'));
     assert.equal(agentHealth.browserAgent.status, 'ready');
     assert.equal(agentHealth.browserAgent.connectedEnvironments, 0);
