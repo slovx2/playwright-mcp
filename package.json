@@ -1,6 +1,6 @@
 {
   "name": "@tyrs-hand/playwright-mcp",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Tyrs Browser Bridge and Playwright MCP distribution",
   "private": true,
   "repository": {
@@ -26,7 +26,10 @@
     "build": "echo OK",
     "bridge:start": "node bridge/src/server.mjs",
     "bridge:test": "node --test bridge/test/*.test.mjs",
+    "agent:build": "tsc -p agent/tsconfig.json",
+    "agent:test": "npm run agent:build && node --test agent/test/*.test.mjs",
     "build-tyrs-bundle": "node scripts/build-tyrs-bundle.mjs",
+    "build-browser-agent": "node scripts/build-browser-agent.mjs",
     "npm-publish": "npm run lint && npm run test && npm publish",
     "docker-build": "docker build --no-cache -t playwright-mcp-dev:latest .",
     "docker-rm": "docker rm playwright-mcp-dev",
@@ -41,12 +44,14 @@
     }
   },
   "dependencies": {
-    "playwright-core": "1.62.0-alpha-1783623505000"
+    "playwright-core": "1.62.0-alpha-1783623505000",
+    "ws": "8.18.3"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.25.2",
     "@playwright/test": "1.62.0-alpha-1783623505000",
-    "@types/node": "24.3.0"
+    "@types/node": "24.3.0",
+    "typescript": "5.9.2"
   },
   "bin": {
     "playwright-mcp": "cli.js"

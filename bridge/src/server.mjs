@@ -1,18 +1,20 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { allowedClient, isLoopback, parseAllowedCIDRs } from './network.mjs';
+import { verifyScopedAuthorization } from './auth.mjs';
 
-const bridgeVersion = '0.1.3';
+const bridgeVersion = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version;
 const publicHost = process.env.TYRS_BROWSER_MCP_HOST || '0.0.0.0';
 const publicPort = parsePort(process.env.TYRS_BROWSER_MCP_PORT, 8931);
 const relayPort = parsePort(process.env.TYRS_BROWSER_RELAY_PORT, 8932);
 const internalPort = parsePort(process.env.TYRS_BROWSER_INTERNAL_MCP_PORT, 8933);
-if (new Set([publicPort, relayPort, internalPort]).size !== 3)
-  throw new Error('public, relay, and internal MCP ports must be different');
-const mcpToken = await readToken('TYRS_BROWSER_MCP_TOKEN_FILE');
+const agentPort = parsePort(process.env.TYRS_BROWSER_AGENT_PORT, 8934);
+if (new Set([publicPort, relayPort, internalPort, agentPort]).size !== 4)
+  throw new Error('public, relay, internal MCP, and agent ports must be different');
+const mcpSecret = await readToken('TYRS_BROWSER_MCP_TOKEN_FILE');
 const extensionToken = await readToken('TYRS_BROWSER_EXTENSION_TOKEN_FILE');
 const extensionId = required('TYRS_BROWSER_EXTENSION_ID');
 const releaseRoot = process.env.TYRS_BROWSER_RELEASE_DIR || '';
@@ -37,8 +39,11 @@ const child = spawn(process.execPath, mcpArguments, {
   env: {
     ...process.env,
     PLAYWRIGHT_MCP_EXTENSION_TOKEN: extensionToken,
+    PLAYWRIGHT_MCP_SCOPE_SECRET: mcpSecret,
     PLAYWRIGHT_EXTENSION_PROTOCOL: '2',
     TYRS_BROWSER_RELAY_PORT: String(relayPort),
+    TYRS_BROWSER_AGENT_PORT: String(agentPort),
+    TYRS_BROWSER_AGENT_HOST: process.env.TYRS_BROWSER_AGENT_HOST || '0.0.0.0',
     TYRS_BROWSER_EXTENSION_ID: extensionId,
   },
 });
@@ -54,7 +59,7 @@ const server = http.createServer(async (request, response) => {
       return sendJSON(response, 403, { error: 'network is not allowed' });
     const pathname = new URL(request.url || '/', 'http://localhost').pathname;
     if (pathname === '/health' && request.method === 'GET')
-      return sendJSON(response, 200, healthPayload());
+      return sendJSON(response, 200, await healthPayload());
     if (pathname === '/extension-status' && request.method === 'POST')
       return await receiveExtensionStatus(request, response);
     if (pathname === '/extension/config' && request.method === 'GET') {
@@ -70,9 +75,10 @@ const server = http.createServer(async (request, response) => {
       return await serveUpdateManifest(response);
     if (pathname === '/extension/tyrs-browser.crx' && request.method === 'GET')
       return await serveCRX(response);
-    if (!authorized(request.headers.authorization, mcpToken))
+    const scope = verifyScopedAuthorization(request.headers.authorization, mcpSecret);
+    if (!scope)
       return sendJSON(response, 401, { error: 'unauthorized' });
-    proxyToMCP(request, response);
+    proxyToMCP(request, response, scope);
   } catch (error) {
     sendJSON(response, 500, { error: error instanceof Error ? error.message : String(error) });
   }
@@ -85,8 +91,9 @@ server.listen(publicPort, publicHost, () => {
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.on(signal, () => shutdown(signal));
 
-function proxyToMCP(request, response) {
-  const headers = { ...request.headers, host: `127.0.0.1:${internalPort}` };
+function proxyToMCP(request, response, scope) {
+  const headers = { ...request.headers, host: `127.0.0.1:${internalPort}`,
+    'x-tyrs-browser-scope': scope };
   delete headers.authorization;
   const upstream = http.request({
     host: '127.0.0.1',
@@ -118,15 +125,28 @@ async function receiveExtensionStatus(request, response) {
   sendJSON(response, 204, undefined);
 }
 
-function healthPayload() {
+async function healthPayload() {
   const lastSeen = extensionStatus.lastSeenAt ? Date.parse(extensionStatus.lastSeenAt) : 0;
   const connected = extensionStatus.connected === true && Date.now() - lastSeen < 45_000;
+  let browserAgent = { status: 'starting', port: agentPort };
+  try {
+    const response = await fetch(`http://127.0.0.1:${internalPort}/browser-agent-health`, {
+      signal: AbortSignal.timeout(500),
+    });
+    if (response.ok)
+      browserAgent = { status: 'ready', port: agentPort, ...await response.json() };
+    else
+      browserAgent = { status: 'degraded', port: agentPort };
+  } catch {
+    browserAgent = { status: 'degraded', port: agentPort };
+  }
   return {
     status: connected ? 'ready' : 'degraded',
     bridgeVersion,
     extensionId,
     ...extensionStatus,
     connected,
+    browserAgent,
   };
 }
 

@@ -5,16 +5,24 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { deriveScopedToken } from '../src/auth.mjs';
 
 test('health is public while MCP requires a bearer token', async () => {
   const bridge = await startBridge();
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
-    assert.equal(health.bridgeVersion, '0.1.3');
+    assert.equal(health.bridgeVersion, '0.2.0');
+    const agentHealth = await waitForAgentHealth(bridge.url('/health'));
+    assert.equal(agentHealth.browserAgent.status, 'ready');
+    assert.equal(agentHealth.browserAgent.connectedEnvironments, 0);
     assert.equal((await fetch(bridge.url('/mcp'), { method: 'POST' })).status, 401);
     assert.equal((await fetch(bridge.url('/mcp'), {
       method: 'POST', headers: { authorization: 'Bearer wrong' },
+    })).status, 401);
+    assert.notEqual((await fetch(bridge.url('/mcp'), {
+      method: 'POST', headers: { authorization: `Bearer ${deriveScopedToken('mcp-secret', 'worker')}`,
+        'content-type': 'application/json' }, body: '{}',
     })).status, 401);
     assert.equal((await fetch(bridge.url('/extension/update.xml'))).status, 404);
   } finally {
@@ -150,8 +158,9 @@ async function createFixture(options = {}) {
   await writeFile(mcpTokenFile, options.emptyMCPToken ? '' : 'mcp-secret\n', { mode: 0o600 });
   await writeFile(extensionTokenFile, 'extension-secret\n', { mode: 0o600 });
   const publicPort = await freePort();
-  const relayPort = options.duplicatePorts ? publicPort : await freePort();
-  const internalPort = await freePort();
+  const relayPort = options.duplicatePorts ? publicPort : await distinctPort(new Set([publicPort]));
+  const internalPort = await distinctPort(new Set([publicPort, relayPort]));
+  const agentPort = await distinctPort(new Set([publicPort, relayPort, internalPort]));
   const releaseRoot = join(directory, 'release');
   if (options.release) {
     await mkdir(releaseRoot);
@@ -165,6 +174,7 @@ async function createFixture(options = {}) {
     env: { ...process.env, TYRS_BROWSER_MCP_HOST: '127.0.0.1',
       TYRS_BROWSER_MCP_PORT: String(publicPort), TYRS_BROWSER_RELAY_PORT: String(relayPort),
       TYRS_BROWSER_INTERNAL_MCP_PORT: String(internalPort),
+      TYRS_BROWSER_AGENT_PORT: String(agentPort),
       TYRS_BROWSER_MCP_TOKEN_FILE: mcpTokenFile,
       TYRS_BROWSER_EXTENSION_TOKEN_FILE: extensionTokenFile,
       TYRS_BROWSER_EXTENSION_ID: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -201,6 +211,14 @@ async function freePort() {
   return port;
 }
 
+async function distinctPort(used) {
+  for (;;) {
+    const port = await freePort();
+    if (!used.has(port))
+      return port;
+  }
+}
+
 async function waitForHealth(url, expectedStatus) {
   let lastError;
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -217,4 +235,14 @@ async function waitForHealth(url, expectedStatus) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw lastError ?? new Error('bridge did not become healthy');
+}
+
+async function waitForAgentHealth(url) {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const value = await waitForHealth(url);
+    if (value.browserAgent?.status === 'ready')
+      return value;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('Browser Agent registry did not become healthy');
 }

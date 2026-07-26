@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.2.0
+
 jobs:
   release:
     if: startsWith(github.event.release.tag_name, 'tyrs-v')
@@ -19,12 +22,13 @@ jobs:
       - name: Download pinned Playwright Core artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          PLAYWRIGHT_RELEASE_TAG: tyrs-v0.1.0
         run: |
           install -d "${RUNNER_TEMP}/tyrs-playwright"
-          gh release download "$PLAYWRIGHT_RELEASE_TAG" \
+          gh release download "$TYRS_PLAYWRIGHT_RELEASE" \
             --repo slovx2/playwright \
             --pattern playwright-core.tgz \
+            --pattern playwright-artifacts.json \
+            --pattern tyrs-browser-extension.crx \
             --dir "${RUNNER_TEMP}/tyrs-playwright"
       - name: Build self-contained bridge bundle
         run: |
@@ -34,6 +38,12 @@ jobs:
           node scripts/build-tyrs-bundle.mjs \
             "${RUNNER_TEMP}/tyrs-playwright/playwright-core.tgz" \
             out/tyrs-browser-bridge
+          npm run agent:test
+          node scripts/build-browser-agent.mjs \
+            "${RUNNER_TEMP}/tyrs-playwright/playwright-core.tgz" \
+            "${RUNNER_TEMP}/tyrs-playwright/tyrs-browser-extension.crx" \
+            "${RUNNER_TEMP}/tyrs-playwright/playwright-artifacts.json" \
+            out/tyrs-browser-agent
       - name: Upload release artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -42,4 +52,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             out/tyrs-browser-bridge/tyrs-browser-bridge-bundle.tgz \
             out/tyrs-browser-bridge/bridge-artifact.json \
+            out/tyrs-browser-agent/tyrs-browser-agent-darwin-arm64.tgz \
+            out/tyrs-browser-agent/tyrs-browser-agent-darwin-x64.tgz \
+            out/tyrs-browser-agent/browser-agent-artifact.json \
             --clobber

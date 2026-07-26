@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.1.0
+  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.2.0
 
 jobs:
   test:
@@ -30,6 +30,8 @@ jobs:
           gh release download "$TYRS_PLAYWRIGHT_RELEASE" \
             --repo slovx2/playwright \
             --pattern playwright-core.tgz \
+            --pattern playwright-artifacts.json \
+            --pattern tyrs-browser-extension.crx \
             --dir "${RUNNER_TEMP}/tyrs-playwright"
       - name: Test and package Bridge
         run: |
@@ -39,3 +41,9 @@ jobs:
           node scripts/build-tyrs-bundle.mjs \
             "${RUNNER_TEMP}/tyrs-playwright/playwright-core.tgz" \
             out/tyrs-browser-bridge
+          npm run agent:test
+          node scripts/build-browser-agent.mjs \
+            "${RUNNER_TEMP}/tyrs-playwright/playwright-core.tgz" \
+            "${RUNNER_TEMP}/tyrs-playwright/tyrs-browser-extension.crx" \
+            "${RUNNER_TEMP}/tyrs-playwright/playwright-artifacts.json" \
+            out/tyrs-browser-agent
