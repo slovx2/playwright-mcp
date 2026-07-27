@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 export const preface = Buffer.from('TYRS-BROWSER/1\n');
 export const maxFrameSize = 64 * 1024 * 1024;
 export const maxPrefaceNoise = 64 * 1024;
+export const maxWriteQueueSize = 2 * (maxFrameSize + 4);
 
 export class FramedStream extends EventEmitter {
   #input: any;
@@ -10,6 +11,8 @@ export class FramedStream extends EventEmitter {
   #buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   #ready = false;
   #closed = false;
+  #writeTail: Promise<void> = Promise.resolve();
+  #queuedWriteBytes = 0;
 
   constructor(input: any, output: any) {
     super();
@@ -19,6 +22,7 @@ export class FramedStream extends EventEmitter {
     input.on('end', () => this.#close());
     input.on('error', error => this.#close(error));
     output.on('error', error => this.#close(error));
+    output.on('close', () => this.#close());
   }
 
   ready() {
@@ -34,6 +38,21 @@ export class FramedStream extends EventEmitter {
     const header = Buffer.allocUnsafe(4);
     header.writeUInt32BE(payload.length);
     const data = Buffer.concat([header, payload]);
+    if (this.#queuedWriteBytes + data.length > maxWriteQueueSize)
+      throw new Error('Browser Agent write queue is full');
+    this.#queuedWriteBytes += data.length;
+    const write = this.#writeTail.then(() => this.#write(data));
+    this.#writeTail = write.catch(() => {});
+    try {
+      await write;
+    } finally {
+      this.#queuedWriteBytes -= data.length;
+    }
+  }
+
+  async #write(data: Buffer) {
+    if (this.#closed)
+      throw new Error('Browser Agent stream is closed');
     if (!this.#output.write(data)) {
       await new Promise<void>((resolve, reject) => {
         const onDrain = () => finish(resolve);

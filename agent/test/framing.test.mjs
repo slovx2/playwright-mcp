@@ -49,6 +49,40 @@ test('framed stream rejects excessive preface noise and oversized frames', async
   }
 });
 
+test('framed stream serializes concurrent writes behind one backpressure listener', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough({ highWaterMark: 1 });
+  const stream = new FramedStream(input, output);
+  const writes = Array.from({ length: 100 }, (_, id) => stream.send({ type: 'event', id }));
+
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(output.listenerCount('drain'), 1);
+  assert.equal(output.listenerCount('close'), 2);
+  assert.equal(output.listenerCount('error'), 2);
+
+  const chunks = [];
+  output.on('data', chunk => chunks.push(chunk));
+  await Promise.all(writes);
+  assert.deepEqual(decodeFrames(Buffer.concat(chunks)),
+      Array.from({ length: 100 }, (_, id) => ({ type: 'event', id })));
+  assert.equal(output.listenerCount('drain'), 0);
+  assert.equal(output.listenerCount('close'), 1);
+  assert.equal(output.listenerCount('error'), 1);
+});
+
+test('framed stream rejects the active and queued writes when backpressure stream closes', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough({ highWaterMark: 1 });
+  const stream = new FramedStream(input, output);
+  const writes = [stream.send({ type: 'first' }), stream.send({ type: 'second' })];
+  await new Promise(resolve => setImmediate(resolve));
+  output.destroy();
+  const results = await Promise.allSettled(writes);
+  assert.deepEqual(results.map(result => result.status), ['rejected', 'rejected']);
+  assert.match(results[0].reason.message, /closed during write/);
+  assert.match(results[1].reason.message, /stream is closed/);
+});
+
 function frame(message) {
   const payload = Buffer.from(JSON.stringify(message));
   const header = Buffer.alloc(4);
@@ -60,4 +94,14 @@ function oversizedHeader() {
   const header = Buffer.alloc(4);
   header.writeUInt32BE(maxFrameSize + 1);
   return header;
+}
+
+function decodeFrames(data) {
+  const messages = [];
+  while (data.length) {
+    const length = data.readUInt32BE(0);
+    messages.push(JSON.parse(data.subarray(4, 4 + length).toString()));
+    data = data.subarray(4 + length);
+  }
+  return messages;
 }
