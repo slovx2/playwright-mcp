@@ -443,7 +443,7 @@ Playwright MCP server supports following arguments. They can be provided in the 
 | --save-session | Whether to save the Playwright MCP session into the output directory.<br>*env* `PLAYWRIGHT_MCP_SAVE_SESSION` |
 | --secrets <path> | path to a file containing secrets in the dotenv format<br>*env* `PLAYWRIGHT_MCP_SECRETS_FILE` |
 | --shared-browser-context | reuse the same browser context between all connected HTTP clients.<br>*env* `PLAYWRIGHT_MCP_SHARED_BROWSER_CONTEXT` |
-| --snapshot-mode <mode> | when taking snapshots for responses, specifies the mode to use. Can be "full" or "none". Default is "full".<br>*env* `PLAYWRIGHT_MCP_SNAPSHOT_MODE` |
+| --snapshot-mode <mode> | when taking snapshots for action responses, specifies the mode to use. Can be "full" or "none". Default is "none".<br>*env* `PLAYWRIGHT_MCP_SNAPSHOT_MODE` |
 | --storage-state <path> | path to the storage state file for isolated sessions.<br>*env* `PLAYWRIGHT_MCP_STORAGE_STATE` |
 | --test-id-attribute <attribute> | specify the attribute to use for test ids, defaults to "data-testid"<br>*env* `PLAYWRIGHT_MCP_TEST_ID_ATTRIBUTE` |
 | --timeout-action <timeout> | specify action timeout in milliseconds, defaults to 5000ms<br>*env* `PLAYWRIGHT_MCP_TIMEOUT_ACTION` |
@@ -854,6 +854,15 @@ http.createServer(async (req, res) => {
 
 <!-- NOTE: This has been generated via update-readme.js -->
 
+- **browser_batch**
+  - Title: Run browser actions
+  - Description: Run up to 20 structured browser actions sequentially. Stops at the first error. Include browser_snapshot or browser_take_screenshot only when an observation is needed.
+  - Parameters:
+    - `actions` (array): undefined
+  - Read-only: **false**
+
+<!-- NOTE: This has been generated via update-readme.js -->
+
 - **browser_click**
   - Title: Click
   - Description: Perform click on a web page
@@ -987,6 +996,14 @@ http.createServer(async (req, res) => {
 
 <!-- NOTE: This has been generated via update-readme.js -->
 
+- **browser_navigate_forward**
+  - Title: Go forward
+  - Description: Go forward to the next page in the history
+  - Parameters: None
+  - Read-only: **false**
+
+<!-- NOTE: This has been generated via update-readme.js -->
+
 - **browser_network_request**
   - Title: Show network request details
   - Description: Returns full details (headers and body) of a single network request, or a single part if `part` is set. Use the number from browser_network_requests.
@@ -1014,6 +1031,14 @@ http.createServer(async (req, res) => {
   - Description: Press a key on the keyboard
   - Parameters:
     - `key` (string): Name of the key to press or a character to generate, such as `ArrowLeft` or `a`
+  - Read-only: **false**
+
+<!-- NOTE: This has been generated via update-readme.js -->
+
+- **browser_reload**
+  - Title: Reload the page
+  - Description: Reload the current page
+  - Parameters: None
   - Read-only: **false**
 
 <!-- NOTE: This has been generated via update-readme.js -->
@@ -1104,13 +1129,35 @@ http.createServer(async (req, res) => {
 
 <!-- NOTE: This has been generated via update-readme.js -->
 
+- **browser_session_name**
+  - Title: Name browser session
+  - Description: Name the current browser session with a task-relevant emoji and short label.
+  - Parameters:
+    - `name` (string): undefined
+  - Read-only: **false**
+
+<!-- NOTE: This has been generated via update-readme.js -->
+
 - **browser_tabs**
   - Title: Manage tabs
   - Description: List, create, close, or select a browser tab.
   - Parameters:
     - `action` (string): Operation to perform
     - `index` (number, optional): Tab index, used for close/select. If omitted for close, current tab is closed.
+    - `tabId` (string, optional): Stable tab id used for claim and disposition actions.
+    - `title` (string, optional): Expected current tab title used for fail-closed claim.
+    - `expectedUrl` (string, optional): Expected current tab URL used for fail-closed claim.
     - `url` (string, optional): URL to navigate to in the new tab, used for new.
+  - Read-only: **false**
+
+<!-- NOTE: This has been generated via update-readme.js -->
+
+- **browser_visibility**
+  - Title: Show browser tab
+  - Description: Show the controlled Chrome tab only when the user explicitly asks to watch or take over. visible=false keeps background execution and does not change focus.
+  - Parameters:
+    - `visible` (boolean): undefined
+    - `tabId` (string, optional): undefined
   - Read-only: **false**
 
 </details>
