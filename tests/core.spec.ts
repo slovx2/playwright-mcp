@@ -16,6 +16,8 @@
 
 import { test, expect } from './fixtures';
 
+test.use({ mcpArgs: ['--snapshot-mode=full'] });
+
 test('browser_navigate', async ({ client, server }) => {
   expect(await client.callTool({
     name: 'browser_navigate',

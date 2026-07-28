@@ -16,6 +16,8 @@
 
 import { test, expect } from './fixtures';
 
+test.use({ mcpArgs: ['--snapshot-mode=full'] });
+
 test('browser_click', async ({ client, server }) => {
   server.setContent('/', `
     <title>Title</title>

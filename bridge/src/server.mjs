@@ -6,7 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { allowedClient, isLoopback, parseAllowedCIDRs } from './network.mjs';
 import { verifyScopedAuthorization } from './auth.mjs';
 
-const bridgeVersion = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version;
+const bridgePackage = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8'));
+const bridgeVersion = bridgePackage.version;
+const requiredAgentVersion = bridgePackage.tyrsBrowserAgentVersion;
+const requiredExtensionVersion = bridgePackage.tyrsBrowserExtensionVersion;
+if (!/^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/.test(requiredAgentVersion) ||
+    !/^\d+(\.\d+){0,3}$/.test(requiredExtensionVersion))
+  throw new Error('browser component versions are invalid');
 const publicHost = process.env.TYRS_BROWSER_MCP_HOST || '0.0.0.0';
 const publicPort = parsePort(process.env.TYRS_BROWSER_MCP_PORT, 8931);
 const relayPort = parsePort(process.env.TYRS_BROWSER_RELAY_PORT, 8932);
@@ -44,6 +50,9 @@ const child = spawn(process.execPath, mcpArguments, {
     TYRS_BROWSER_RELAY_PORT: String(relayPort),
     TYRS_BROWSER_AGENT_PORT: String(agentPort),
     TYRS_BROWSER_AGENT_HOST: process.env.TYRS_BROWSER_AGENT_HOST || '0.0.0.0',
+    TYRS_BROWSER_BRIDGE_VERSION: bridgeVersion,
+    TYRS_BROWSER_REQUIRED_AGENT_VERSION: requiredAgentVersion,
+    TYRS_BROWSER_REQUIRED_EXTENSION_VERSION: requiredExtensionVersion,
     TYRS_BROWSER_EXTENSION_ID: extensionId,
   },
 });
@@ -114,10 +123,12 @@ async function receiveExtensionStatus(request, response) {
     return sendJSON(response, 401, { error: 'unauthorized' });
   const body = await readJSONBody(request, 64 * 1024);
   extensionStatus = {
-    connected: body.connected === true,
+    connected: body.connected === true && Number(body.extensionProtocol) === 2 &&
+      String(body.extensionVersion || '') === requiredExtensionVersion,
     profile: String(body.profile || 'current'),
     tabCount: Number(body.tabCount || 0),
     extensionVersion: String(body.extensionVersion || ''),
+    extensionProtocol: Number(body.extensionProtocol || 0),
     chromeVersion: String(body.chromeVersion || ''),
     connectedAt: body.connectedAt || null,
     lastSeenAt: new Date().toISOString(),

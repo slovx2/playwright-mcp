@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 
-export const preface = Buffer.from('TYRS-BROWSER/1\n');
+export const preface = Buffer.from('TYRS-BROWSER/2\n');
 export const maxFrameSize = 64 * 1024 * 1024;
 export const maxPrefaceNoise = 64 * 1024;
 export const maxWriteQueueSize = 2 * (maxFrameSize + 4);

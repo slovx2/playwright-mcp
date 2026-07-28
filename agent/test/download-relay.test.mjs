@@ -21,7 +21,7 @@ test('download completion waits for checksum transfer acknowledgement', async ()
   };
   downloadRelay = new DownloadRelay({
     queryDownloads: async () => [{ id: 9, state: 'complete', filename: file }],
-  }, () => stream);
+  }, () => stream, () => '11111111-1111-4111-8111-111111111111');
   const forwarded = [];
   await downloadRelay.onCDPMessage({ method: 'Browser.downloadWillBegin',
     params: { guid: 'download-guid', url: 'https://example.test/file' } }, message => forwarded.push(message));
@@ -33,6 +33,7 @@ test('download completion waits for checksum transfer acknowledgement', async ()
   await downloadRelay.onCDPMessage({ method: 'Browser.downloadProgress',
     params: { guid: 'download-guid', state: 'completed' } }, message => forwarded.push(message));
   assert.deepEqual(sent.map(message => message.type), ['download_begin', 'download_chunk', 'download_end']);
+  assert.equal(sent[0].sessionId, '11111111-1111-4111-8111-111111111111');
   assert.equal(forwarded.at(-1).params.state, 'completed');
   await rm(directory, { recursive: true, force: true });
 });

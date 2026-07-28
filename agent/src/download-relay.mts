@@ -7,13 +7,15 @@ const chunkSize = 1024 * 1024;
 export class DownloadRelay {
   #relay: any;
   #getStream: () => any;
+  #getSessionId: () => string;
   #downloads: any[] = [];
   #items: any[] = [];
   #acks = new Map<string, { resolve: () => void, reject: (error: unknown) => void }>();
 
-  constructor(relay, getStream) {
+  constructor(relay, getStream, getSessionId = () => '') {
     this.#relay = relay;
     this.#getStream = getStream;
+    this.#getSessionId = getSessionId;
   }
 
   onExtensionEvent(method, params) {
@@ -116,9 +118,12 @@ export class DownloadRelay {
     if (!stream)
       throw new Error('Worker relay 未连接');
     const transferId = crypto.randomUUID();
+    const sessionId = this.#getSessionId();
+    if (!sessionId)
+      throw new Error('下载没有关联的浏览器会话');
     let acknowledgement;
     try {
-      await stream.send({ type: 'download_begin', transferId, guid, size: stat.size });
+      await stream.send({ type: 'download_begin', sessionId, transferId, guid, size: stat.size });
       const digest = crypto.createHash('sha256');
       for await (const chunk of fs.createReadStream(item.filename, { highWaterMark: chunkSize })) {
         digest.update(chunk);

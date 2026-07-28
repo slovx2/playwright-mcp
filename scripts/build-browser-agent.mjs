@@ -16,6 +16,7 @@ const output = resolve(outputArgument);
 const temporary = await mkdtemp(join(tmpdir(), 'tyrs-browser-agent-'));
 const lock = JSON.parse(await readFile(join(root, 'agent/runtime-lock.json'), 'utf8'));
 const agentPackage = JSON.parse(await readFile(join(root, 'agent/package.json'), 'utf8'));
+const bridgePackage = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const revision = run('git', ['rev-parse', 'HEAD'], root).trim();
 const dirty = Boolean(run('git', [
   'status', '--porcelain', '--', '.', ':(exclude)out', ':(exclude)agent/lib',
@@ -33,6 +34,7 @@ try {
   await writeFile(join(app, 'browser-agent-release.json'), `${JSON.stringify({
     agentVersion: agentPackage.version,
     extensionVersion: playwrightManifest.extensionVersion,
+    bridgeVersion: bridgePackage.version,
   }, null, 2)}\n`);
   await writeFile(join(app, 'package.json'), `${JSON.stringify({
     ...agentPackage,

@@ -10,7 +10,7 @@ test('framed stream ignores bounded SSH startup noise and parses split frames', 
   const stream = new FramedStream(input, output);
   const messages = [];
   stream.on('message', message => messages.push(message));
-  input.write('shell banner\nTYRS-BROWSER/1\n');
+  input.write('shell banner\nTYRS-BROWSER/2\n');
   const payload = Buffer.from(JSON.stringify({ type: 'ping', at: 7 }));
   const header = Buffer.alloc(4);
   header.writeUInt32BE(payload.length);
