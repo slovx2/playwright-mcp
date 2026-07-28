@@ -26,12 +26,14 @@ const configPath = process.env.TYRS_BROWSER_AGENT_CONFIG || path.join(os.homedir
     'Library', 'Application Support', 'Tyrs Hand', 'browser-agent', 'config.json');
 const config = validateConfig(JSON.parse(await fs.promises.readFile(configPath, 'utf8')));
 process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = config.extensionToken;
+process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION = extensionVersion;
 process.env.PLAYWRIGHT_EXTENSION_PROTOCOL = '2';
+process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION = '1';
 
 let remoteStream;
 const capabilityVersion = 1;
 let extensionStatus = { connected: false, tabCount: 0, extensionVersion: '',
-  extensionProtocol: 2, chromeVersion: '', reason: 'Chrome extension 未连接' };
+  extensionProtocol: 2, capabilityVersion: 1, chromeVersion: '', reason: 'Chrome extension 未连接' };
 let relaySession;
 let restartingRelay;
 let relayConnected = false;
@@ -67,23 +69,28 @@ const publicServer = http.createServer(async (request, response) => {
       if (!authorized(request.headers.authorization, config.extensionToken))
         return sendJSON(response, 401, { error: 'unauthorized' });
       const body = await readJSON(request, 64 * 1024);
-      const wasConnected = extensionStatus.connected;
+      const compatible = Number(body.extensionProtocol) === 2 &&
+        Number(body.capabilityVersion) === 1 &&
+        String(body.extensionVersion || '') === extensionVersion;
+      if (relayConnected && !compatible)
+        return sendJSON(response, 204);
       extensionStatus = {
-        connected: body.connected === true && Number(body.extensionProtocol) === 2 &&
-          String(body.extensionVersion || '') === extensionVersion,
+        connected: relayConnected,
         tabCount: Number(body.tabCount || 0),
         extensionVersion: String(body.extensionVersion || ''),
         extensionProtocol: Number(body.extensionProtocol || 0),
+        capabilityVersion: Number(body.capabilityVersion || 0),
         chromeVersion: String(body.chromeVersion || ''),
-        reason: body.connected === true && Number(body.extensionProtocol) !== 2 ?
+        reason: relayConnected ? '' :
+          (body.connected === true && Number(body.extensionProtocol) !== 2 ?
           'Chrome extension 协议版本不匹配' :
-          (body.connected === true && String(body.extensionVersion || '') !== extensionVersion ?
+          (body.connected === true && Number(body.capabilityVersion) !== 1 ?
+            'Chrome extension 能力版本不匹配' :
+            (body.connected === true && String(body.extensionVersion || '') !== extensionVersion ?
             `Chrome extension 版本不匹配，需要 ${extensionVersion}` :
-            (body.connected === true ? '' : 'Chrome extension 未连接')),
+              'Chrome extension 或本地执行器正在连接'))),
       };
       await sendStatus().catch(error => log(error));
-      if (!extensionStatus.connected && (wasConnected || relayConnected))
-        void restartRelay().catch(error => log(error));
       return sendJSON(response, 204);
     }
     if (url.pathname === '/extension/update.xml') {
@@ -186,6 +193,10 @@ async function restartRelay() {
       },
       onCDPMessage: (message, forward) => downloads.onCDPMessage(message, forward),
       onCDPTiming: (method, durationMs) => executor?.recordCDPTiming(method, durationMs),
+      onExtensionDisconnected: () => {
+        if (relaySession?.relay === relay && relayConnected)
+          void restartRelay().catch(error => log(error));
+      },
     });
     relaySession = { server, relay, downloads };
     void relay.establishExtensionConnection('Tyrs Desktop Browser Agent').then(async () => {
@@ -199,6 +210,9 @@ async function restartRelay() {
       browserExecutor = executor;
       relayConnected = true;
       extensionStatus.connected = true;
+      extensionStatus.extensionVersion = extensionVersion;
+      extensionStatus.extensionProtocol = 2;
+      extensionStatus.capabilityVersion = 1;
       extensionStatus.reason = '';
       await sendStatus().catch(error => log(error));
     }).catch(async error => {

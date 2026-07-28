@@ -45,6 +45,8 @@ const child = spawn(process.execPath, mcpArguments, {
   env: {
     ...process.env,
     PLAYWRIGHT_MCP_EXTENSION_TOKEN: extensionToken,
+    PLAYWRIGHT_MCP_EXTENSION_VERSION: requiredExtensionVersion,
+    PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION: '1',
     PLAYWRIGHT_MCP_SCOPE_SECRET: mcpSecret,
     PLAYWRIGHT_EXTENSION_PROTOCOL: '2',
     TYRS_BROWSER_RELAY_PORT: String(relayPort),
@@ -122,13 +124,18 @@ async function receiveExtensionStatus(request, response) {
   if (!isLoopback(request.socket.remoteAddress) || !authorized(request.headers.authorization, extensionToken))
     return sendJSON(response, 401, { error: 'unauthorized' });
   const body = await readJSONBody(request, 64 * 1024);
+  const compatible = Number(body.extensionProtocol) === 2 &&
+    Number(body.capabilityVersion) === 1 &&
+    String(body.extensionVersion || '') === requiredExtensionVersion;
+  if (extensionStatus.connected && !compatible)
+    return sendJSON(response, 204, undefined);
   extensionStatus = {
-    connected: body.connected === true && Number(body.extensionProtocol) === 2 &&
-      String(body.extensionVersion || '') === requiredExtensionVersion,
+    connected: body.connected === true && compatible,
     profile: String(body.profile || 'current'),
     tabCount: Number(body.tabCount || 0),
     extensionVersion: String(body.extensionVersion || ''),
     extensionProtocol: Number(body.extensionProtocol || 0),
+    capabilityVersion: Number(body.capabilityVersion || 0),
     chromeVersion: String(body.chromeVersion || ''),
     connectedAt: body.connectedAt || null,
     lastSeenAt: new Date().toISOString(),
