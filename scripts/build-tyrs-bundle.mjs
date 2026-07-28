@@ -26,13 +26,20 @@ try {
   const runtimePackage = {
     name: sourcePackage.name,
     version: sourcePackage.version,
+    tyrsBrowserAgentVersion: sourcePackage.tyrsBrowserAgentVersion,
+    tyrsBrowserExtensionVersion: sourcePackage.tyrsBrowserExtensionVersion,
     private: true,
     type: 'commonjs',
     engines: sourcePackage.engines,
     scripts: { start: 'node bridge/src/server.mjs' },
     dependencies: { 'playwright-core': `file:./${coreName}` },
   };
-  await writeFile(join(stageRoot, 'package.json'), `${JSON.stringify(runtimePackage, null, 2)}\n`);
+  const runtimePackagePath = join(stageRoot, 'package.json');
+  await writeFile(runtimePackagePath, `${JSON.stringify(runtimePackage, null, 2)}\n`);
+  const writtenPackage = JSON.parse(await readFile(runtimePackagePath, 'utf8'));
+  if (writtenPackage.tyrsBrowserAgentVersion !== sourcePackage.tyrsBrowserAgentVersion ||
+      writtenPackage.tyrsBrowserExtensionVersion !== sourcePackage.tyrsBrowserExtensionVersion)
+    throw new Error('runtime browser component versions were not preserved');
   run('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], stageRoot);
 
   await mkdir(outputRoot, { recursive: true });
