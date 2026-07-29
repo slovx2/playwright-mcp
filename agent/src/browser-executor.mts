@@ -311,11 +311,7 @@ export class BrowserExecutor {
 
   async #discoverTabs() {
     const { count: expectedPageCount, tabs } = await this.#relay.discoverTabs();
-    const deadline = Date.now() + 2_000;
-    while (this.#context.pages().length < expectedPageCount && Date.now() < deadline)
-      await new Promise(resolve => setTimeout(resolve, 10));
-    if (this.#context.pages().length < expectedPageCount)
-      throw new Error('Chrome tabs were discovered but did not become available');
+    await waitForPageDiscovery(this.#context, expectedPageCount);
     return tabs;
   }
 
@@ -378,6 +374,25 @@ export class BrowserExecutor {
       return await callback();
     } finally {
       release();
+    }
+  }
+}
+
+export async function waitForPageDiscovery(context, expectedPageCount,
+    options: { timeoutMs?: number; settleMs?: number } = {}) {
+  const timeoutMs = options.timeoutMs ?? 2_000;
+  const settleMs = options.settleMs ?? 100;
+  const deadline = Date.now() + timeoutMs;
+  let observedPageCount = context.pages().length;
+  let settledAt = Date.now();
+  while (observedPageCount < expectedPageCount && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const currentPageCount = context.pages().length;
+    if (currentPageCount !== observedPageCount) {
+      observedPageCount = currentPageCount;
+      settledAt = Date.now();
+    } else if (Date.now() - settledAt >= settleMs) {
+      break;
     }
   }
 }

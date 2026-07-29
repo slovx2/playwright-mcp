@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BrowserExecutor, decorateTabListResult } from '../lib/browser-executor.mjs';
+import {
+  BrowserExecutor,
+  decorateTabListResult,
+  waitForPageDiscovery,
+} from '../lib/browser-executor.mjs';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
 
@@ -28,6 +32,12 @@ test('discovers Chrome tabs before starting the Playwright CDP connection', asyn
 
   await assert.rejects(() => executor.start(), /stop after discovery/);
   assert.deepEqual(calls, ['discover', 'endpoint']);
+});
+
+test('tab discovery tolerates Chrome pages that do not enter the Playwright context', async () => {
+  const context = { pages: () => [{ id: 'available' }] };
+  await waitForPageDiscovery(context, 3, { timeoutMs: 20, settleMs: 1 });
+  assert.equal(context.pages().length, 1);
 });
 
 test('maps an agent tab when the Chrome title is temporarily empty', () => {

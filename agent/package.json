@@ -1,6 +1,6 @@
 {
   "name": "@tyrs-hand/browser-agent",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "private": true,
   "type": "module",
   "dependencies": {
