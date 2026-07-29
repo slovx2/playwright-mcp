@@ -54,6 +54,7 @@ export class BrowserExecutor {
   }
 
   async start() {
+    await this.#relay.discoverTabs();
     this.#browser = await chromium.connectOverCDP(this.#relay.cdpEndpoint(), {
       isLocal: true,
       timeout: 0,

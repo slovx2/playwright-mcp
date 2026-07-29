@@ -1,13 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decorateTabListResult } from '../lib/browser-executor.mjs';
+import { BrowserExecutor, decorateTabListResult } from '../lib/browser-executor.mjs';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
 
 function resultFor(tabs) {
   return { content: [{ type: 'text', text: JSON.stringify({ session: 'Test', tabs }, null, 2) }] };
 }
+
+test('discovers Chrome tabs before starting the Playwright CDP connection', async () => {
+  const calls = [];
+  const relay = {
+    async discoverTabs() {
+      calls.push('discover');
+      return { count: 1, tabs: [] };
+    },
+    cdpEndpoint() {
+      calls.push('endpoint');
+      throw new Error('stop after discovery');
+    },
+  };
+  const executor = new BrowserExecutor(relay, {
+    BrowserBackend: class {},
+    browserTools: [],
+  }, { bootstrapUrl: 'http://127.0.0.1:8931/browser-bootstrap' });
+
+  await assert.rejects(() => executor.start(), /stop after discovery/);
+  assert.deepEqual(calls, ['discover', 'endpoint']);
+});
 
 test('maps an agent tab when the Chrome title is temporarily empty', () => {
   const session = { tabIds: new Map() };
