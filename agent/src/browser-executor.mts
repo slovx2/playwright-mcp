@@ -364,43 +364,7 @@ export class BrowserExecutor {
   }
 
   #decorateTabListResult(sessionId, session, result, discoveredTabs) {
-    const parsed = extractResultJSON(result);
-    if (!parsed || !Array.isArray(parsed.value.tabs))
-      return;
-    session.tabIds.clear();
-    const unused = new Set<number>(discoveredTabs.map((_tab, index) => index));
-    for (const tab of parsed.value.tabs) {
-      const candidates = [...unused].filter(index => {
-        const candidate = discoveredTabs[index];
-        return String(candidate.url || '') === String(tab.url || '') &&
-          String(candidate.title || '') === String(tab.title || '');
-      });
-      const match = candidates.find(index => {
-        const state = discoveredTabs[index].tyrs;
-        if (tab.origin === 'agent')
-          return state?.origin === 'agent' && state.sessionId === sessionId;
-        if (tab.origin === 'user' && tab.current)
-          return state?.origin === 'user' && state.sessionId === sessionId;
-        return !state?.sessionId;
-      }) ?? candidates[0];
-      if (match === undefined)
-        continue;
-      unused.delete(match);
-      const native = discoveredTabs[match];
-      const stableId = `chrome-tab:${native.id}`;
-      if (typeof tab.id === 'string')
-        session.tabIds.set(stableId, tab.id);
-      tab.tabId = stableId;
-      tab.source = native.tyrs?.origin || 'user';
-      tab.session = native.tyrs?.sessionName;
-      tab.disposition = native.tyrs?.disposition || 'omit';
-      tab.lease = native.tyrs?.sessionId ? {
-        ownerSessionId: native.tyrs.sessionId,
-        ownedByCurrentSession: native.tyrs.sessionId === sessionId,
-      } : null;
-    }
-    parsed.item.text = `${parsed.item.text.slice(0, parsed.start)}` +
-      `${JSON.stringify(parsed.value, null, 2)}${parsed.item.text.slice(parsed.end)}`;
+    decorateTabListResult(sessionId, session, result, discoveredTabs);
   }
 
   async #withOwnershipLock(callback: () => Promise<unknown>) {
@@ -481,6 +445,67 @@ function extractResultJSON(result) {
     }
   }
   return undefined;
+}
+
+export function decorateTabListResult(sessionId, session, result, discoveredTabs) {
+  const parsed = extractResultJSON(result);
+  if (!parsed || !Array.isArray(parsed.value.tabs))
+    return;
+  session.tabIds.clear();
+  const unused = new Set<number>(discoveredTabs.map((_tab, index) => index));
+  for (const tab of parsed.value.tabs) {
+    const match = matchDiscoveredTab(sessionId, tab, discoveredTabs, unused);
+    if (match === undefined)
+      continue;
+    unused.delete(match);
+    const native = discoveredTabs[match];
+    const stableId = `chrome-tab:${native.id}`;
+    if (typeof tab.id === 'string')
+      session.tabIds.set(stableId, tab.id);
+    const origin = native.tyrs?.origin || 'user';
+    tab.tabId = stableId;
+    tab.origin = origin;
+    tab.source = origin;
+    tab.session = native.tyrs?.sessionName;
+    tab.disposition = native.tyrs?.disposition || 'omit';
+    tab.lease = native.tyrs?.sessionId ? {
+      ownerSessionId: native.tyrs.sessionId,
+      ownedByCurrentSession: native.tyrs.sessionId === sessionId,
+    } : null;
+  }
+  parsed.item.text = `${parsed.item.text.slice(0, parsed.start)}` +
+    `${JSON.stringify(parsed.value, null, 2)}${parsed.item.text.slice(parsed.end)}`;
+}
+
+function matchDiscoveredTab(sessionId, tab, discoveredTabs, unused: Set<number>) {
+  const urlCandidates = [...unused].filter(index =>
+    String(discoveredTabs[index].url || '') === String(tab.url || ''));
+  if (!urlCandidates.length)
+    return undefined;
+  const ownershipCandidates = urlCandidates.filter(index =>
+    ownershipMatches(sessionId, tab, discoveredTabs[index].tyrs));
+  const preferred = ownershipCandidates.length ? ownershipCandidates : urlCandidates;
+  const titleCandidates = preferred.filter(index => {
+    const nativeTitle = String(discoveredTabs[index].title || '');
+    const backendTitle = String(tab.title || '');
+    return nativeTitle && backendTitle && nativeTitle === backendTitle;
+  });
+  if (titleCandidates.length === 1)
+    return titleCandidates[0];
+  if (preferred.length === 1)
+    return preferred[0];
+  return undefined;
+}
+
+function ownershipMatches(sessionId, tab, state) {
+  if (tab.origin === 'agent') {
+    return state?.origin === 'agent' &&
+      (state.sessionId === sessionId ||
+        (!state.sessionId && state.disposition && state.disposition !== 'omit'));
+  }
+  if (tab.origin === 'user' && tab.current)
+    return state?.origin === 'user' && state.sessionId === sessionId;
+  return !state?.sessionId;
 }
 
 function requiredId(value, name) {
