@@ -115,14 +115,15 @@ export class ServiceTunnels {
 
 export function serviceForwardArguments(config, localPort: number, targetPort: number): string[] {
   return [
-    '-N', '-T', '-p', String(config.ssh.port), '-l', config.ssh.user,
+    '-N', '-T', '-F', '/dev/null',
+    '-p', String(config.ssh.port), '-l', config.ssh.user,
     '-i', config.ssh.identityFile,
     '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
     '-o', 'StrictHostKeyChecking=yes',
     '-o', `UserKnownHostsFile=${config.ssh.knownHostsFile}`,
     '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
     '-o', 'ConnectTimeout=15', '-o', 'ExitOnForwardFailure=yes',
-    '-o', 'ClearAllForwardings=yes', '-o', 'GatewayPorts=no',
+    '-o', 'GatewayPorts=no',
     '-L', `127.0.0.1:${localPort}:127.0.0.1:${targetPort}`,
     config.ssh.host,
   ];

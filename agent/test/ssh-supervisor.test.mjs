@@ -26,9 +26,10 @@ test('service forwarding binds loopback and targets only development loopback', 
     knownHostsFile: '/keys/known_hosts',
   } };
   const args = serviceForwardArguments(config, 49152, 8000);
+  assert.deepEqual(args.slice(0, 4), ['-N', '-T', '-F', '/dev/null']);
   assert.ok(args.includes('ExitOnForwardFailure=yes'));
   assert.ok(args.includes('GatewayPorts=no'));
-  assert.ok(args.includes('ClearAllForwardings=yes'));
+  assert.equal(args.includes('ClearAllForwardings=yes'), false);
   assert.deepEqual(args.slice(-3), [
     '-L', '127.0.0.1:49152:127.0.0.1:8000', 'worker.example.test',
   ]);
