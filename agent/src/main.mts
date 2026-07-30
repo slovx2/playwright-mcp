@@ -7,6 +7,7 @@ import path from 'node:path';
 import { BrowserExecutor } from './browser-executor.mjs';
 import { DownloadRelay } from './download-relay.mjs';
 import { SSHSupervisor } from './ssh-supervisor.mjs';
+import { ServiceTunnels } from './service-tunnels.mjs';
 import { ToolArtifactSender } from './tool-artifacts.mjs';
 
 const require = createRequire(import.meta.url);
@@ -31,7 +32,7 @@ process.env.PLAYWRIGHT_EXTENSION_PROTOCOL = '2';
 process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION = '1';
 
 let remoteStream;
-const capabilityVersion = 1;
+const capabilityVersion = 2;
 let extensionStatus = { connected: false, tabCount: 0, extensionVersion: '',
   extensionProtocol: 2, capabilityVersion: 1, chromeVersion: '', reason: 'Chrome extension 未连接' };
 let relaySession;
@@ -42,6 +43,11 @@ let remoteGeneration = '';
 let lastRemoteMessageAt = 0;
 let remoteControlQueue = Promise.resolve();
 const toolArtifacts = new ToolArtifactSender();
+const serviceTunnels = new ServiceTunnels(config, (serviceId, activeConnections) => {
+  void remoteStream?.send({
+    type: 'service_activity', generation: remoteGeneration, serviceId, activeConnections,
+  }).catch(error => log(error));
+}, message => message && log(message));
 
 const publicServer = http.createServer(async (request, response) => {
   try {
@@ -122,7 +128,8 @@ const supervisor = new SSHSupervisor(config, {
     remoteControlQueue = Promise.resolve();
     lastRemoteMessageAt = Date.now();
     stream.on('message', message => {
-      const ordered = ['welcome', 'session_open', 'session_finalize'].includes(message.type);
+      const ordered = ['welcome', 'session_open', 'session_finalize', 'service_open',
+        'service_close', 'service_reset'].includes(message.type);
       const task = ordered ?
         (remoteControlQueue = remoteControlQueue.then(() => handleRemoteMessage(message, stream))) :
         (message.type === 'tool_call' ?
@@ -137,7 +144,7 @@ const supervisor = new SSHSupervisor(config, {
     stream.on('close', () => disconnectRemote(stream));
     void stream.send({ type: 'hello', protocol: 2, capabilityVersion, agentVersion, bridgeVersion,
       platform: 'darwin', instanceId: config.instanceId,
-      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] })
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] })
         .then(() => sendStatus()).catch(error => log(error));
   },
   onDisconnect: details => log(`SSH disconnected: ${JSON.stringify(details)}`),
@@ -242,7 +249,7 @@ async function handleRemoteMessage(message, stream) {
           message.bridgeVersion !== bridgeVersion ||
           Number(message.maxFileBytes) !== 25 * 1024 * 1024 ||
           typeof message.generation !== 'string' || !Array.isArray(message.capabilities) ||
-          !['local-tool-execution', 'cancellation', 'sessions', 'artifacts']
+          !['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels']
               .every(value => message.capabilities.includes(value)))
         throw new Error('Worker Browser Agent protocol is incompatible');
       remoteGeneration = message.generation;
@@ -268,6 +275,50 @@ async function handleRemoteMessage(message, stream) {
       assertGeneration(message);
       ensureExecutor().cancel(message);
       break;
+    case 'service_open':
+      assertGeneration(message);
+      await handleServiceOpen(message, stream);
+      break;
+    case 'service_close':
+      assertGeneration(message);
+      await handleServiceClose(message, stream);
+      break;
+    case 'service_reset':
+      assertGeneration(message);
+      await serviceTunnels.closeAll();
+      break;
+  }
+}
+
+async function handleServiceOpen(message, stream) {
+  try {
+    const endpointPort = await serviceTunnels.open(String(message.serviceId || ''),
+        Number(message.targetPort));
+    await stream.send({
+      type: 'service_result', requestId: message.requestId,
+      serviceId: message.serviceId, endpointPort,
+    });
+  } catch (error) {
+    await stream.send({
+      type: 'service_result', requestId: message.requestId,
+      serviceId: message.serviceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function handleServiceClose(message, stream) {
+  try {
+    await serviceTunnels.close(String(message.serviceId || ''));
+    await stream.send({
+      type: 'service_result', requestId: message.requestId, serviceId: message.serviceId,
+    });
+  } catch (error) {
+    await stream.send({
+      type: 'service_result', requestId: message.requestId,
+      serviceId: message.serviceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -353,6 +404,7 @@ async function shutdown() {
   clearInterval(statusTimer);
   clearInterval(heartbeatTimer);
   supervisor.stop();
+  await serviceTunnels.closeAll();
   await browserExecutor?.stop().catch(error => log(error));
   relaySession?.relay.stop();
   await Promise.all([closeServer(relaySession?.server), closeServer(publicServer)]);
