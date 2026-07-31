@@ -12,7 +12,7 @@ test('health is public while MCP requires a bearer token', async () => {
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
-    assert.equal(health.bridgeVersion, '0.3.11');
+    assert.equal(health.bridgeVersion, '0.3.12');
     const agentHealth = await waitForAgentHealth(bridge.url('/health'));
     assert.equal(agentHealth.browserAgent.status, 'ready');
     assert.equal(agentHealth.browserAgent.connectedEnvironments, 0);
@@ -39,7 +39,7 @@ test('extension relay is prewarmed on its dedicated port and validates the token
     assert.equal((await waitForWebSocketClose(wrongPath)).code, 4004);
     const stale = await connectWebSocket(`${bridge.relayURL}/extension?token=extension-secret`);
     assert.equal((await waitForWebSocketClose(stale)).code, 4002);
-    const handshake = 'token=extension-secret&extensionVersion=0.3.6&extensionProtocol=2&capabilityVersion=1';
+    const handshake = 'token=extension-secret&extensionVersion=0.3.7&extensionProtocol=2&capabilityVersion=1';
     const accepted = await connectWebSocket(`${bridge.relayURL}/extension?${handshake}`);
     accepted.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
     assert.equal(accepted.readyState, WebSocket.OPEN);
@@ -66,7 +66,7 @@ test('extension status requires loopback token and drives health state', async (
       method: 'POST',
       headers: { authorization: 'Bearer extension-secret', 'content-type': 'application/json' },
       body: JSON.stringify({ connected: true, profile: 'current', tabCount: 7,
-        extensionVersion: '0.3.6', extensionProtocol: 2, capabilityVersion: 1,
+        extensionVersion: '0.3.7', extensionProtocol: 2, capabilityVersion: 1,
         chromeVersion: 'Chrome/150', connectedAt: '2026-07-22T00:00:00Z' }),
     });
     assert.equal(accepted.status, 204);

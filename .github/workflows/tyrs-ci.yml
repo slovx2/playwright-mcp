@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.3.7
+  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.3.9
 
 jobs:
   test:

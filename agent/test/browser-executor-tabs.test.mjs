@@ -9,8 +9,8 @@ import {
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
 
-function resultFor(tabs) {
-  return { content: [{ type: 'text', text: JSON.stringify({ session: 'Test', tabs }, null, 2) }] };
+function resultFor(controlledTabs, userTabs = []) {
+  return { content: [{ type: 'text', text: JSON.stringify({ session: 'Test', controlledTabs, userTabs }, null, 2) }] };
 }
 
 test('discovers Chrome tabs before starting the Playwright CDP connection', async () => {
@@ -41,9 +41,9 @@ test('tab discovery tolerates Chrome pages that do not enter the Playwright cont
 });
 
 test('maps an agent tab when the Chrome title is temporarily empty', () => {
-  const session = { tabIds: new Map() };
+  const session = { tabIds: new Map(), claimTokens: new Map() };
   const result = resultFor([{
-    id: 'backend-tab',
+    tabId: 'backend-tab',
     url: 'https://example.com/result',
     title: 'Example Domain',
     origin: 'agent',
@@ -57,7 +57,7 @@ test('maps an agent tab when the Chrome title is temporarily empty', () => {
     tyrs: { sessionId, sessionName: 'Test', origin: 'agent', disposition: 'omit' },
   }]);
 
-  const tab = JSON.parse(result.content[0].text).tabs[0];
+  const tab = JSON.parse(result.content[0].text).controlledTabs[0];
   assert.equal(tab.tabId, 'chrome-tab:42');
   assert.equal(tab.origin, 'agent');
   assert.equal(tab.source, 'agent');
@@ -66,9 +66,9 @@ test('maps an agent tab when the Chrome title is temporarily empty', () => {
 });
 
 test('restores retained metadata when a new backend sees the page as user-owned', () => {
-  const session = { tabIds: new Map() };
+  const session = { tabIds: new Map(), claimTokens: new Map() };
   const result = resultFor([{
-    id: 'backend-retained',
+    tabId: 'backend-retained',
     url: 'https://example.org/result',
     title: 'Example Domain',
     origin: 'user',
@@ -82,7 +82,7 @@ test('restores retained metadata when a new backend sees the page as user-owned'
     tyrs: { sessionName: 'Handoff', origin: 'agent', disposition: 'handoff' },
   }]);
 
-  const tab = JSON.parse(result.content[0].text).tabs[0];
+  const tab = JSON.parse(result.content[0].text).controlledTabs[0];
   assert.equal(tab.tabId, 'chrome-tab:84');
   assert.equal(tab.origin, 'agent');
   assert.equal(tab.source, 'agent');
@@ -91,9 +91,9 @@ test('restores retained metadata when a new backend sees the page as user-owned'
 });
 
 test('does not guess between indistinguishable user tabs', () => {
-  const session = { tabIds: new Map() };
-  const result = resultFor([{
-    id: 'backend-user',
+  const session = { tabIds: new Map(), claimTokens: new Map() };
+  const result = resultFor([], [{
+    claimToken: '11111111-2222-4333-8444-555555555555',
     url: 'https://example.net/',
     title: '',
     origin: 'user',
@@ -105,7 +105,26 @@ test('does not guess between indistinguishable user tabs', () => {
     { id: 2, url: 'https://example.net/', title: '', tyrs: {} },
   ]);
 
-  const tab = JSON.parse(result.content[0].text).tabs[0];
-  assert.equal(tab.tabId, undefined);
+  const tab = JSON.parse(result.content[0].text).userTabs[0];
+  assert.equal(tab.claimToken, '11111111-2222-4333-8444-555555555555');
   assert.equal(session.tabIds.size, 0);
+  assert.equal(session.claimTokens.size, 0);
+});
+
+test('maps an opaque claim token to one unambiguous user tab', () => {
+  const session = { tabIds: new Map(), claimTokens: new Map() };
+  const claimToken = '11111111-2222-4333-8444-555555555555';
+  const result = resultFor([], [{
+    claimToken,
+    url: 'https://example.net/',
+    title: 'Example',
+    current: false,
+  }]);
+
+  decorateTabListResult(sessionId, session, result, [
+    { id: 7, url: 'https://example.net/', title: 'Example', tyrs: {} },
+  ]);
+
+  assert.equal(session.claimTokens.get(claimToken), 'chrome-tab:7');
+  assert.equal(JSON.parse(result.content[0].text).userTabs[0].tabId, undefined);
 });

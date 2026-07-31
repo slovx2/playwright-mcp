@@ -12,6 +12,7 @@ type Session = {
   interrupted: boolean;
   timing?: { cdpCount: number; cdpMs: number };
   tabIds: Map<string, string>;
+  claimTokens: Map<string, string>;
 };
 
 export class BrowserExecutor {
@@ -85,6 +86,7 @@ export class BrowserExecutor {
         outputMode: 'stdout',
         snapshot: { mode: 'none' },
         isolatedTabs: true,
+        protectSensitiveData: true,
         timeouts: { action: 5_000, navigation: 60_000, expect: 5_000 },
       }, this.#context, this.#browserTools);
       await backend.initialize({
@@ -106,6 +108,7 @@ export class BrowserExecutor {
         workspace,
         interrupted: false,
         tabIds: new Map(),
+        claimTokens: new Map(),
       });
     } catch (error) {
       await backend?.dispose().catch(() => {});
@@ -193,12 +196,10 @@ export class BrowserExecutor {
       controller.abort(new Error('Browser session finalized'));
     await session.queue.catch(() => {});
     let finalizeError;
-    if (!session.interrupted) {
-      try {
-        await session.backend.callTool('browser_tabs', { action: 'finalize' }, new AbortController().signal);
-      } catch (error) {
-        finalizeError = error;
-      }
+    try {
+      await session.backend.callTool('browser_tabs', { action: 'finalize' }, new AbortController().signal);
+    } catch (error) {
+      finalizeError = error;
     }
     await this.#relay.extensionCommand('tyrs.session.finalize', [{ sessionId }]).catch(error => finalizeError ??= error);
     await session.backend.dispose().catch(() => {});
@@ -216,7 +217,7 @@ export class BrowserExecutor {
     this.#context = undefined;
   }
 
-  async #syncExtensionState(sessionId, name, args, nativeTabId?: number) {
+  async #syncExtensionState(sessionId, name, args, nativeTabId?: number, claimedTab?: { title: string; url: string }) {
     if (name === 'browser_session_name')
       await this.#relay.extensionCommand('tyrs.session.name', [{ sessionId, name: String(args.name || '') }]);
     if (name === 'browser_visibility')
@@ -225,8 +226,8 @@ export class BrowserExecutor {
       await this.#relay.extensionCommand('tyrs.tab.claim', [{
         sessionId,
         tabId: nativeTabId,
-        title: String(args.title || ''),
-        url: String(args.expectedUrl || ''),
+        title: claimedTab?.title || '',
+        url: claimedTab?.url || '',
       }]);
     }
     if (name === 'browser_tabs' && (args.action === 'mark_deliverable' || args.action === 'mark_handoff')) {
@@ -244,9 +245,11 @@ export class BrowserExecutor {
     const prepared = await this.#prepareCall(sessionId, session, name, args, signal);
     const result = await session.backend.callTool(name, prepared.args, signal);
     if (!result?.isError)
-      await this.#syncExtensionState(sessionId, name, prepared.args, prepared.nativeTabId);
-    if (name === 'browser_tabs' && prepared.args.action === 'list')
-      this.#decorateTabListResult(sessionId, session, result, prepared.discoveredTabs || []);
+      await this.#syncExtensionState(sessionId, name, prepared.args, prepared.nativeTabId, prepared.claimedTab);
+    if (name === 'browser_tabs' && prepared.args.action !== 'finalize') {
+      const discoveredTabs = prepared.discoveredTabs || await this.#discoverTabs();
+      this.#decorateTabListResult(sessionId, session, result, discoveredTabs);
+    }
     return result;
   }
 
@@ -318,15 +321,33 @@ export class BrowserExecutor {
   async #prepareCall(sessionId, session, name, rawArgs, signal) {
     const args = { ...rawArgs };
     const action = String(args.action || '');
+    const controlledAction = name === 'browser_tabs' &&
+      ['close', 'select', 'mark_deliverable', 'mark_handoff'].includes(action) && args.tabId;
     const requiresDiscovery = name === 'browser_tabs' &&
-      (action === 'list' || action === 'claim' ||
-       ((action === 'mark_deliverable' || action === 'mark_handoff') && args.tabId)) ||
+      (action === 'list' || action === 'claim' || controlledAction) ||
       (name === 'browser_visibility' && args.tabId);
     const discoveredTabs = requiresDiscovery ? await this.#discoverTabs() : undefined;
+
+    if (name === 'browser_tabs' && action === 'claim') {
+      const claimToken = String(args.claimToken || '');
+      const stableTabId = session.claimTokens.get(claimToken);
+      session.claimTokens.delete(claimToken);
+      if (!stableTabId)
+        throw new Error('Claim token is invalid or expired; list tabs again');
+      const nativeTabId = parseNativeTabId(stableTabId);
+      const discovered = discoveredTabs?.find(tab => tab.id === nativeTabId);
+      if (!discovered || discovered.tyrs?.sessionId)
+        throw new Error('Claimed tab is no longer available; list tabs again');
+      return {
+        args,
+        discoveredTabs,
+        nativeTabId,
+        claimedTab: { title: String(discovered.title || ''), url: String(discovered.url || '') },
+      };
+    }
+
     let stableTabId = isNativeTabId(args.tabId) ? String(args.tabId) :
       [...session.tabIds].find(([, backendId]) => backendId === args.tabId)?.[0];
-    if (!stableTabId && name === 'browser_tabs' && action === 'claim')
-      throw new Error('claim requires a stable chrome-tab:<id> from browser_tabs list');
     if (!stableTabId)
       return { args, discoveredTabs };
     const nativeTabId = parseNativeTabId(stableTabId);
@@ -335,12 +356,7 @@ export class BrowserExecutor {
       throw new Error(`Chrome tab ${args.tabId} is no longer available`);
     if (discovered.tyrs?.sessionId && discovered.tyrs.sessionId !== sessionId)
       throw new Error(`Tab is leased by session ${discovered.tyrs.sessionId}`);
-    if (name === 'browser_tabs' && action === 'claim') {
-      if ((discovered.title || '') !== String(args.title || ''))
-        throw new Error('Tab title changed after it was listed');
-      if ((discovered.url || '') !== String(args.expectedUrl || ''))
-        throw new Error('Tab URL changed after it was listed');
-    } else if (name === 'browser_tabs' &&
+    if (name === 'browser_tabs' &&
         (action === 'mark_deliverable' || action === 'mark_handoff') &&
         discovered.tyrs?.sessionId !== sessionId) {
       throw new Error('Tab must be claimed before it can be marked');
@@ -465,19 +481,23 @@ function extractResultJSON(result) {
 
 export function decorateTabListResult(sessionId, session, result, discoveredTabs) {
   const parsed = extractResultJSON(result);
-  if (!parsed || !Array.isArray(parsed.value.tabs))
+  if (!parsed || !Array.isArray(parsed.value.controlledTabs) || !Array.isArray(parsed.value.userTabs))
     return;
   session.tabIds.clear();
+  session.claimTokens.clear();
   const unused = new Set<number>(discoveredTabs.map((_tab, index) => index));
-  for (const tab of parsed.value.tabs) {
+  const backendCurrentTabId = parsed.value.currentTabId;
+  for (const tab of parsed.value.controlledTabs) {
     const match = matchDiscoveredTab(sessionId, tab, discoveredTabs, unused);
     if (match === undefined)
       continue;
     unused.delete(match);
     const native = discoveredTabs[match];
     const stableId = `chrome-tab:${native.id}`;
-    if (typeof tab.id === 'string')
-      session.tabIds.set(stableId, tab.id);
+    if (typeof tab.tabId === 'string')
+      session.tabIds.set(stableId, tab.tabId);
+    if (tab.tabId === backendCurrentTabId)
+      parsed.value.currentTabId = stableId;
     const origin = native.tyrs?.origin || 'user';
     tab.tabId = stableId;
     tab.origin = origin;
@@ -488,6 +508,14 @@ export function decorateTabListResult(sessionId, session, result, discoveredTabs
       ownerSessionId: native.tyrs.sessionId,
       ownedByCurrentSession: native.tyrs.sessionId === sessionId,
     } : null;
+  }
+  for (const tab of parsed.value.userTabs) {
+    const match = matchDiscoveredTab(sessionId, tab, discoveredTabs, unused);
+    if (match === undefined)
+      continue;
+    unused.delete(match);
+    if (typeof tab.claimToken === 'string')
+      session.claimTokens.set(tab.claimToken, `chrome-tab:${discoveredTabs[match].id}`);
   }
   parsed.item.text = `${parsed.item.text.slice(0, parsed.start)}` +
     `${JSON.stringify(parsed.value, null, 2)}${parsed.item.text.slice(parsed.end)}`;

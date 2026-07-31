@@ -81,11 +81,12 @@ function formatToolForReadme(tool) {
     Object.entries(inputSchema.properties).forEach(([name, param]) => {
       const optional = !requiredParams.includes(name);
       const meta = /** @type {string[]} */ ([]);
-      if (param.type)
-        meta.push(param.type);
+      const parameterType = param.type || (param.oneOf?.every(item => item.type === 'object') ? 'object' : '');
+      if (parameterType)
+        meta.push(parameterType);
       if (optional)
         meta.push('optional');
-      lines.push(`    - \`${name}\` ${meta.length ? `(${meta.join(', ')})` : ''}: ${param.description}`);
+      lines.push(`    - \`${name}\` ${meta.length ? `(${meta.join(', ')})` : ''}: ${parameterDescription(param)}`);
     });
   } else {
     lines.push(`  - Parameters: None`);
@@ -93,6 +94,28 @@ function formatToolForReadme(tool) {
   lines.push(`  - Read-only: **${tool.type === 'readOnly'}**`);
   lines.push('');
   return lines;
+}
+
+/**
+ * @param {any} schema
+ * @returns {string}
+ */
+function parameterDescription(schema) {
+  if (schema.description)
+    return schema.description;
+  if (Array.isArray(schema.oneOf)) {
+    const variants = schema.oneOf.map(variant => {
+      const properties = variant.properties || {};
+      const kind = properties.kind?.const;
+      const fields = Object.entries(properties).filter(([name]) => name !== 'kind').map(([name, value]) => {
+        const choices = Array.isArray(value.enum) ? `=${value.enum.join('|')}` : '';
+        return `${name}${choices}`;
+      });
+      return `${kind ? `kind=${kind}` : 'object'}{${fields.join(', ')}}`;
+    });
+    return `One of: ${variants.join('; ')}.`;
+  }
+  return 'No additional description.';
 }
 
 /**

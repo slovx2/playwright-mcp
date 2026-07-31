@@ -858,7 +858,7 @@ http.createServer(async (req, res) => {
   - Title: Run browser actions
   - Description: Run up to 20 structured browser actions sequentially. Stops at the first error. Include browser_snapshot or browser_take_screenshot only when an observation is needed.
   - Parameters:
-    - `actions` (array): undefined
+    - `actions` (array): No additional description.
   - Read-only: **false**
 
 <!-- NOTE: This has been generated via update-readme.js -->
@@ -955,6 +955,8 @@ http.createServer(async (req, res) => {
   - Parameters:
     - `text` (string, optional): Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.
     - `regex` (string, optional): Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.
+    - `exact` (boolean, optional): For text search, require a case-insensitive whole-line match. Defaults to false.
+    - `limit` (integer, optional): Maximum number of matches to return. Defaults to 20.
   - Read-only: **true**
 
 <!-- NOTE: This has been generated via update-readme.js -->
@@ -1114,12 +1116,11 @@ http.createServer(async (req, res) => {
 <!-- NOTE: This has been generated via update-readme.js -->
 
 - **browser_wait_for**
-  - Title: Wait for
-  - Description: Wait for text to appear or disappear or a specified time to pass
+  - Title: Wait for a browser condition
+  - Description: Wait for one explicit locator, text, URL, load, response, or delay condition. Prefer observable conditions over delay.
   - Parameters:
-    - `time` (number, optional): The time to wait in seconds
-    - `text` (string, optional): The text to wait for
-    - `textGone` (string, optional): The text to wait for to disappear
+    - `condition` (object): One of: kind=locator{target, state=attached|detached|visible|hidden|enabled|disabled}; kind=text{text, state=visible|hidden, exact}; kind=url{value, match=exact|glob|regex}; kind=load{state=domcontentloaded|load|networkidle}; kind=response{url, match=exact|glob|regex, method, status}; kind=delay{delayMs}.
+    - `timeoutMs` (integer, optional): Timeout in milliseconds. Defaults to 5000.
   - Read-only: **false**
 
 </details>
@@ -1133,20 +1134,18 @@ http.createServer(async (req, res) => {
   - Title: Name browser session
   - Description: Name the current browser session with a task-relevant emoji and short label.
   - Parameters:
-    - `name` (string): undefined
+    - `name` (string): No additional description.
   - Read-only: **false**
 
 <!-- NOTE: This has been generated via update-readme.js -->
 
 - **browser_tabs**
   - Title: Manage tabs
-  - Description: List, create, close, or select a browser tab.
+  - Description: List, create, close, select, claim, or retain browser tabs. Controlled and user tabs are returned separately.
   - Parameters:
     - `action` (string): Operation to perform
-    - `index` (number, optional): Tab index, used for close/select. If omitted for close, current tab is closed.
-    - `tabId` (string, optional): Stable tab id used for claim and disposition actions.
-    - `title` (string, optional): Expected current tab title used for fail-closed claim.
-    - `expectedUrl` (string, optional): Expected current tab URL used for fail-closed claim.
+    - `tabId` (string, optional): Stable controlled tab id used for close, select, and disposition actions.
+    - `claimToken` (string, optional): Short-lived token returned for an unclaimed user tab.
     - `url` (string, optional): URL to navigate to in the new tab, used for new.
   - Read-only: **false**
 
@@ -1156,8 +1155,8 @@ http.createServer(async (req, res) => {
   - Title: Show browser tab
   - Description: Show the controlled Chrome tab only when the user explicitly asks to watch or take over. visible=false keeps background execution and does not change focus.
   - Parameters:
-    - `visible` (boolean): undefined
-    - `tabId` (string, optional): undefined
+    - `visible` (boolean): No additional description.
+    - `tabId` (string, optional): No additional description.
   - Read-only: **false**
 
 </details>
