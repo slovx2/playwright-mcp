@@ -9,7 +9,7 @@ test('SSH uses an independent stdio session with strict host identity and no for
     host: 'worker.example.test', port: 2222, user: 'dev', identityFile: '/keys/id_ed25519',
     knownHostsFile: '/keys/known_hosts',
   } });
-  assert.deepEqual(args.slice(-4), ['worker.example.test', 'tyrs-hand-dev', 'browser', 'proxy']);
+  assert.deepEqual(args.slice(-4), ['worker.example.test', 'tyrs-hand-worker', 'browser', 'proxy']);
   assert.ok(args.includes('BatchMode=yes'));
   assert.ok(args.includes('IdentitiesOnly=yes'));
   assert.ok(args.includes('StrictHostKeyChecking=yes'));

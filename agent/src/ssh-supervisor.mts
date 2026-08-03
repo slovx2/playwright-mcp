@@ -73,6 +73,6 @@ export function sshArguments(config) {
     '-o', `UserKnownHostsFile=${config.ssh.knownHostsFile}`,
     '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
     '-o', 'ConnectTimeout=15', '-o', 'ClearAllForwardings=yes',
-    config.ssh.host, 'tyrs-hand-dev', 'browser', 'proxy',
+    config.ssh.host, 'tyrs-hand-worker', 'browser', 'proxy',
   ];
 }
