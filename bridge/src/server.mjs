@@ -15,11 +15,11 @@ if (!/^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/.test(requiredAgentVersion) ||
   throw new Error('browser component versions are invalid');
 const publicHost = process.env.TYRS_BROWSER_MCP_HOST || '0.0.0.0';
 const publicPort = parsePort(process.env.TYRS_BROWSER_MCP_PORT, 8931);
-const relayPort = parsePort(process.env.TYRS_BROWSER_RELAY_PORT, 8932);
+const proxyPort = parsePort(process.env.TYRS_BROWSER_PROXY_PORT, 8932);
 const internalPort = parsePort(process.env.TYRS_BROWSER_INTERNAL_MCP_PORT, 8933);
 const agentPort = parsePort(process.env.TYRS_BROWSER_AGENT_PORT, 8934);
-if (new Set([publicPort, relayPort, internalPort, agentPort]).size !== 4)
-  throw new Error('public, relay, internal MCP, and agent ports must be different');
+if (new Set([publicPort, proxyPort, internalPort, agentPort]).size !== 4)
+  throw new Error('public, proxy, internal MCP, and agent ports must be different');
 const mcpSecret = await readToken('TYRS_BROWSER_MCP_TOKEN_FILE');
 const extensionToken = await readToken('TYRS_BROWSER_EXTENSION_TOKEN_FILE');
 const extensionId = required('TYRS_BROWSER_EXTENSION_ID');
@@ -49,7 +49,7 @@ const child = spawn(process.execPath, mcpArguments, {
     PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION: '1',
     PLAYWRIGHT_MCP_SCOPE_SECRET: mcpSecret,
     PLAYWRIGHT_EXTENSION_PROTOCOL: '2',
-    TYRS_BROWSER_RELAY_PORT: String(relayPort),
+    TYRS_BROWSER_PROXY_PORT: String(proxyPort),
     TYRS_BROWSER_AGENT_PORT: String(agentPort),
     TYRS_BROWSER_AGENT_HOST: process.env.TYRS_BROWSER_AGENT_HOST || '0.0.0.0',
     TYRS_BROWSER_BRIDGE_VERSION: bridgeVersion,
@@ -77,7 +77,7 @@ const server = http.createServer(async (request, response) => {
       if (!isLoopback(request.socket.remoteAddress))
         return sendJSON(response, 403, { error: 'extension configuration requires loopback' });
       return sendJSON(response, 200, {
-        relayUrl: `ws://127.0.0.1:${relayPort}/extension`,
+        proxyUrl: `ws://127.0.0.1:${proxyPort}/extension`,
         statusUrl: `http://127.0.0.1:${publicPort}/extension-status`,
         extensionToken,
       }, { 'access-control-allow-origin': `chrome-extension://${extensionId}` });

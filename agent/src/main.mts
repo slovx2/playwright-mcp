@@ -66,7 +66,7 @@ const publicServer = http.createServer(async (request, response) => {
       if (requestedExtensionId && requestedExtensionId !== config.extensionId)
         return sendJSON(response, 403, { error: 'extension id mismatch' });
       return sendJSON(response, 200, {
-        relayUrl: `ws://127.0.0.1:${config.relayPort}/extension`,
+        proxyUrl: `ws://127.0.0.1:${config.proxyPort}/extension`,
         statusUrl: `http://127.0.0.1:${config.publicPort}/extension-status`,
         extensionToken: config.extensionToken,
       }, { 'access-control-allow-origin': `chrome-extension://${config.extensionId}` });
@@ -188,7 +188,7 @@ async function restartRelay() {
       await closeServer(relaySession.server);
     }
     const server = http.createServer();
-    await listen(server, config.relayPort);
+    await listen(server, config.proxyPort);
     const relay = new CDPRelayServer(server, 'chrome');
     let executor;
     const downloads = new DownloadRelay(relay, () => remoteStream, () => executor?.currentSessionId() || '');
@@ -393,8 +393,8 @@ function disconnectRemote(stream) {
   remoteStream = undefined;
   remoteGeneration = '';
   lastRemoteMessageAt = 0;
-  relaySession?.downloads.failPending(new Error('Worker relay disconnected'));
-  toolArtifacts.failPending(new Error('Worker relay disconnected'));
+  relaySession?.downloads.failPending(new Error('Worker Browser Agent disconnected'));
+  toolArtifacts.failPending(new Error('Worker Browser Agent disconnected'));
   void browserExecutor?.stop().catch(error => log(error));
   browserExecutor = undefined;
   void restartRelay().catch(error => log(error));
@@ -429,9 +429,9 @@ function validateConfig(value) {
     throw new Error('Browser Agent path or SSH target is invalid');
   value.ssh.port = validPort(value.ssh.port, 22);
   value.publicPort = validPort(value.publicPort, 8931);
-  value.relayPort = validPort(value.relayPort, 8932);
-  if (value.publicPort === value.relayPort)
-    throw new Error('Browser Agent public and relay ports must differ');
+  value.proxyPort = validPort(value.proxyPort, 8932);
+  if (value.publicPort === value.proxyPort)
+    throw new Error('Browser Agent public and proxy ports must differ');
   return value;
 }
 

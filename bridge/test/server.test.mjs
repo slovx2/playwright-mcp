@@ -12,7 +12,7 @@ test('health is public while MCP requires a bearer token', async () => {
   try {
     const health = await waitForHealth(bridge.url('/health'));
     assert.equal(health.status, 'degraded');
-    assert.equal(health.bridgeVersion, '0.3.15');
+    assert.equal(health.bridgeVersion, '0.3.16');
     const agentHealth = await waitForAgentHealth(bridge.url('/health'));
     assert.equal(agentHealth.browserAgent.status, 'ready');
     assert.equal(agentHealth.browserAgent.connectedEnvironments, 0);
@@ -30,23 +30,23 @@ test('health is public while MCP requires a bearer token', async () => {
   }
 });
 
-test('extension relay is prewarmed on its dedicated port and validates the token', async () => {
+test('extension proxy is prewarmed on its dedicated port and validates the token', async () => {
   const bridge = await startBridge();
   try {
-    const denied = await connectWebSocket(`${bridge.relayURL}/extension?token=wrong`);
+    const denied = await connectWebSocket(`${bridge.proxyURL}/extension?token=wrong`);
     assert.equal((await waitForWebSocketClose(denied)).code, 4001);
-    const wrongPath = await connectWebSocket(`${bridge.relayURL}/wrong?token=extension-secret`);
+    const wrongPath = await connectWebSocket(`${bridge.proxyURL}/wrong?token=extension-secret`);
     assert.equal((await waitForWebSocketClose(wrongPath)).code, 4004);
-    const stale = await connectWebSocket(`${bridge.relayURL}/extension?token=extension-secret`);
+    const stale = await connectWebSocket(`${bridge.proxyURL}/extension?token=extension-secret`);
     assert.equal((await waitForWebSocketClose(stale)).code, 4002);
-    const handshake = 'token=extension-secret&extensionVersion=0.3.7&extensionProtocol=2&capabilityVersion=1';
-    const accepted = await connectWebSocket(`${bridge.relayURL}/extension?${handshake}`);
+    const handshake = 'token=extension-secret&extensionVersion=0.3.8&extensionProtocol=2&capabilityVersion=1';
+    const accepted = await connectWebSocket(`${bridge.proxyURL}/extension?${handshake}`);
     accepted.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
     assert.equal(accepted.readyState, WebSocket.OPEN);
     const acceptedClose = waitForWebSocketClose(accepted);
     accepted.close();
     await acceptedClose;
-    const reconnected = await connectWebSocket(`${bridge.relayURL}/extension?${handshake}`);
+    const reconnected = await connectWebSocket(`${bridge.proxyURL}/extension?${handshake}`);
     reconnected.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
     assert.equal(reconnected.readyState, WebSocket.OPEN);
     reconnected.close();
@@ -66,7 +66,7 @@ test('extension status requires loopback token and drives health state', async (
       method: 'POST',
       headers: { authorization: 'Bearer extension-secret', 'content-type': 'application/json' },
       body: JSON.stringify({ connected: true, profile: 'current', tabCount: 7,
-        extensionVersion: '0.3.7', extensionProtocol: 2, capabilityVersion: 1,
+        extensionVersion: '0.3.8', extensionProtocol: 2, capabilityVersion: 1,
         chromeVersion: 'Chrome/150', connectedAt: '2026-07-22T00:00:00Z' }),
     });
     assert.equal(accepted.status, 204);
@@ -95,7 +95,7 @@ test('extension configuration is loopback bootstrap with separate token and no-s
     assert.equal(response.headers.get('access-control-allow-origin'),
         'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     assert.deepEqual(await response.json(), {
-      relayUrl: `ws://127.0.0.1:${bridge.relayPort}/extension`,
+      proxyUrl: `ws://127.0.0.1:${bridge.proxyPort}/extension`,
       statusUrl: `http://127.0.0.1:${bridge.publicPort}/extension-status`,
       extensionToken: 'extension-secret',
     });
@@ -139,9 +139,9 @@ async function startBridge(options = {}) {
   await waitForHealth(`http://127.0.0.1:${fixture.publicPort}/health`);
   return {
     publicPort: fixture.publicPort,
-    relayPort: fixture.relayPort,
+    proxyPort: fixture.proxyPort,
     url: path => `http://127.0.0.1:${fixture.publicPort}${path}`,
-    relayURL: `ws://127.0.0.1:${fixture.relayPort}`,
+    proxyURL: `ws://127.0.0.1:${fixture.proxyPort}`,
     close: async () => {
       child.kill('SIGTERM');
       await new Promise(resolve => child.once('exit', resolve));
@@ -169,9 +169,9 @@ async function createFixture(options = {}) {
   await writeFile(mcpTokenFile, options.emptyMCPToken ? '' : 'mcp-secret\n', { mode: 0o600 });
   await writeFile(extensionTokenFile, 'extension-secret\n', { mode: 0o600 });
   const publicPort = await freePort();
-  const relayPort = options.duplicatePorts ? publicPort : await distinctPort(new Set([publicPort]));
-  const internalPort = await distinctPort(new Set([publicPort, relayPort]));
-  const agentPort = await distinctPort(new Set([publicPort, relayPort, internalPort]));
+  const proxyPort = options.duplicatePorts ? publicPort : await distinctPort(new Set([publicPort]));
+  const internalPort = await distinctPort(new Set([publicPort, proxyPort]));
+  const agentPort = await distinctPort(new Set([publicPort, proxyPort, internalPort]));
   const releaseRoot = join(directory, 'release');
   if (options.release) {
     await mkdir(releaseRoot);
@@ -181,9 +181,9 @@ async function createFixture(options = {}) {
     await writeFile(join(releaseRoot, 'tyrs-browser-extension.crx'), 'test-crx');
   }
   return {
-    directory, publicPort, relayPort,
+    directory, publicPort, proxyPort,
     env: { ...process.env, TYRS_BROWSER_MCP_HOST: '127.0.0.1',
-      TYRS_BROWSER_MCP_PORT: String(publicPort), TYRS_BROWSER_RELAY_PORT: String(relayPort),
+      TYRS_BROWSER_MCP_PORT: String(publicPort), TYRS_BROWSER_PROXY_PORT: String(proxyPort),
       TYRS_BROWSER_INTERNAL_MCP_PORT: String(internalPort),
       TYRS_BROWSER_AGENT_PORT: String(agentPort),
       TYRS_BROWSER_MCP_TOKEN_FILE: mcpTokenFile,
@@ -207,7 +207,7 @@ async function connectWebSocket(url) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
-  throw lastError ?? new Error('extension relay did not accept WebSocket connections');
+  throw lastError ?? new Error('extension proxy did not accept WebSocket connections');
 }
 
 async function waitForWebSocketClose(socket) {

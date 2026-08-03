@@ -116,7 +116,7 @@ export class DownloadRelay {
       throw new Error('文件大小超过 25 MiB');
     const stream = this.#getStream();
     if (!stream)
-      throw new Error('Worker relay 未连接');
+      throw new Error('Worker Browser Agent 未连接');
     const transferId = crypto.randomUUID();
     const sessionId = this.#getSessionId();
     if (!sessionId)
