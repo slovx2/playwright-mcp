@@ -38,7 +38,8 @@ let extensionStatus = { connected: false, tabCount: 0, extensionVersion: '',
 let relaySession;
 let restartingRelay;
 let relayConnected = false;
-let browserExecutor;
+let browserExecutor: BrowserExecutor | undefined;
+let browserExecutorLifecycle: Promise<void> = Promise.resolve();
 let remoteGeneration = '';
 let lastRemoteMessageAt = 0;
 let remoteControlQueue = Promise.resolve();
@@ -181,8 +182,7 @@ async function restartRelay() {
         reason: 'Desktop Browser Agent connection was reset',
       }).catch(() => {});
     }
-    await browserExecutor?.stop().catch(error => log(error));
-    browserExecutor = undefined;
+    await stopBrowserExecutor(true);
     if (relaySession) {
       relaySession.relay.stop();
       await closeServer(relaySession.server);
@@ -190,8 +190,8 @@ async function restartRelay() {
     const server = http.createServer();
     await listen(server, config.proxyPort);
     const relay = new CDPRelayServer(server, 'chrome');
-    let executor;
-    const downloads = new DownloadRelay(relay, () => remoteStream, () => executor?.currentSessionId() || '');
+    const downloads = new DownloadRelay(relay, () => remoteStream,
+        () => browserExecutor?.currentSessionId() || '');
     relay.setDelegate({
       onExtensionEvent: (method, params) => {
         downloads.onExtensionEvent(method, params);
@@ -199,7 +199,7 @@ async function restartRelay() {
           void handleTakeover(params).catch(error => log(error));
       },
       onCDPMessage: (message, forward) => downloads.onCDPMessage(message, forward),
-      onCDPTiming: (method, durationMs) => executor?.recordCDPTiming(method, durationMs),
+      onCDPTiming: (method, durationMs) => browserExecutor?.recordCDPTiming(method, durationMs),
       onExtensionDisconnected: () => {
         if (relaySession?.relay === relay && relayConnected)
           void restartRelay().catch(error => log(error));
@@ -210,11 +210,6 @@ async function restartRelay() {
       if (relaySession?.relay !== relay)
         return;
       await relay.extensionCommand('tyrs.sessions.reset', []);
-      executor = new BrowserExecutor(relay, tools, {
-        bootstrapUrl: `http://127.0.0.1:${config.publicPort}/browser-bootstrap`,
-      });
-      await executor.start();
-      browserExecutor = executor;
       relayConnected = true;
       extensionStatus.connected = true;
       extensionStatus.extensionVersion = extensionVersion;
@@ -261,11 +256,14 @@ async function handleRemoteMessage(message, stream) {
       break;
     case 'session_open':
       assertGeneration(message);
-      await ensureExecutor().openSession(message);
+      await (await ensureExecutor()).openSession(message);
       break;
     case 'session_finalize':
       assertGeneration(message);
-      await ensureExecutor().finalizeSession(String(message.sessionId || ''));
+      if (browserExecutor) {
+        await browserExecutor.finalizeSession(String(message.sessionId || ''));
+        await stopBrowserExecutor(false);
+      }
       break;
     case 'tool_call':
       assertGeneration(message);
@@ -273,7 +271,7 @@ async function handleRemoteMessage(message, stream) {
       break;
     case 'tool_cancel':
       assertGeneration(message);
-      ensureExecutor().cancel(message);
+      browserExecutor?.cancel(message);
       break;
     case 'service_open':
       assertGeneration(message);
@@ -325,7 +323,7 @@ async function handleServiceClose(message, stream) {
 async function executeRemoteTool(message, stream) {
   const startedAt = performance.now();
   try {
-    const executed = await ensureExecutor().callTool(message);
+    const executed = await (await ensureExecutor()).callTool(message);
     if (remoteStream !== stream || message.generation !== remoteGeneration)
       return;
     const result = await toolArtifacts.externalize(stream, message, executed.result);
@@ -371,10 +369,40 @@ async function handleTakeover(params) {
     reason: 'Browser use was stopped by the user' }).catch(() => {});
 }
 
-function ensureExecutor() {
-  if (!browserExecutor || !relayConnected || !extensionStatus.connected)
-    throw new Error('Chrome Extension 尚未连接');
-  return browserExecutor;
+async function ensureExecutor(): Promise<BrowserExecutor> {
+  return await queueBrowserExecutorLifecycle(async () => {
+    if (browserExecutor)
+      return browserExecutor;
+    if (!relaySession || !relayConnected || !extensionStatus.connected)
+      throw new Error('Chrome Extension 尚未连接');
+    const relay = relaySession.relay;
+    const executor = new BrowserExecutor(relay, tools, {
+      bootstrapUrl: `http://127.0.0.1:${config.publicPort}/browser-bootstrap`,
+    });
+    await executor.start();
+    if (relaySession?.relay !== relay || !relayConnected) {
+      await executor.stop().catch(() => {});
+      throw new Error('Chrome Extension 连接在初始化期间发生变化');
+    }
+    browserExecutor = executor;
+    return executor;
+  });
+}
+
+async function stopBrowserExecutor(force: boolean): Promise<void> {
+  await queueBrowserExecutorLifecycle(async () => {
+    const executor = browserExecutor;
+    if (!executor || (!force && executor.sessionIds().length > 0))
+      return;
+    browserExecutor = undefined;
+    await executor.stop().catch(error => log(error));
+  });
+}
+
+function queueBrowserExecutorLifecycle<T>(callback: () => T | Promise<T>): Promise<T> {
+  const result = browserExecutorLifecycle.then(callback, callback);
+  browserExecutorLifecycle = result.then(() => {}, () => {});
+  return result;
 }
 
 function assertGeneration(message) {
@@ -395,8 +423,6 @@ function disconnectRemote(stream) {
   lastRemoteMessageAt = 0;
   relaySession?.downloads.failPending(new Error('Worker Browser Agent disconnected'));
   toolArtifacts.failPending(new Error('Worker Browser Agent disconnected'));
-  void browserExecutor?.stop().catch(error => log(error));
-  browserExecutor = undefined;
   void restartRelay().catch(error => log(error));
 }
 
@@ -405,7 +431,7 @@ async function shutdown() {
   clearInterval(heartbeatTimer);
   supervisor.stop();
   await serviceTunnels.closeAll();
-  await browserExecutor?.stop().catch(error => log(error));
+  await stopBrowserExecutor(true);
   relaySession?.relay.stop();
   await Promise.all([closeServer(relaySession?.server), closeServer(publicServer)]);
   process.exit(0);

@@ -34,6 +34,47 @@ test('discovers Chrome tabs before starting the Playwright CDP connection', asyn
   assert.deepEqual(calls, ['discover', 'endpoint']);
 });
 
+test('creates the bootstrap tab only when an operation needs a page', async () => {
+  const backendCalls = [];
+  const extensionCalls = [];
+  class Backend {
+    async initialize() {}
+    async callTool(name, args) {
+      backendCalls.push({ name, args });
+      return { content: [{ type: 'text', text: '{}' }] };
+    }
+    async dispose() {}
+  }
+  const relay = {
+    async extensionCommand(method, params) {
+      extensionCalls.push({ method, params });
+      return {};
+    },
+  };
+  const executor = new BrowserExecutor(relay, {
+    BrowserBackend: Backend,
+    browserTools: [],
+  }, { bootstrapUrl: 'http://127.0.0.1:8931/browser-bootstrap' });
+
+  await executor.openSession({ sessionId, clientName: 'Test' });
+  assert.equal(backendCalls.some(call => call.name === 'browser_tabs' && call.args.action === 'new'), false);
+
+  await executor.callTool({
+    sessionId,
+    requestId: '22222222-2222-4222-8222-222222222222',
+    deadlineMs: Date.now() + 10_000,
+    name: 'browser_navigate',
+    arguments: { url: 'https://example.com' },
+  });
+  assert.deepEqual(backendCalls.slice(-2).map(call => [call.name, call.args.action]), [
+    ['browser_tabs', 'new'],
+    ['browser_navigate', undefined],
+  ]);
+  assert.equal(extensionCalls.some(call => call.method === 'tyrs.session.activate'), true);
+
+  await executor.finalizeSession(sessionId);
+});
+
 test('tab discovery tolerates Chrome pages that do not enter the Playwright context', async () => {
   const context = { pages: () => [{ id: 'available' }] };
   await waitForPageDiscovery(context, 3, { timeoutMs: 20, settleMs: 1 });

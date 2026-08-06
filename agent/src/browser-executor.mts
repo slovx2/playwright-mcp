@@ -6,6 +6,7 @@ import { chromium } from 'playwright-core';
 
 type Session = {
   backend: any;
+  bootstrapPending: boolean;
   queue: Promise<void>;
   controllers: Map<string, AbortController>;
   workspace: string;
@@ -97,12 +98,9 @@ export class BrowserExecutor {
       await backend.callTool('browser_session_name', {
         name: sessionName,
       }, new AbortController().signal);
-      await backend.callTool('browser_tabs', {
-        action: 'new',
-        url: `${this.#bootstrapUrl}#${sessionId}`,
-      }, new AbortController().signal);
       this.#sessions.set(sessionId, {
         backend,
+        bootstrapPending: true,
         queue: Promise.resolve(),
         controllers: new Map(),
         workspace,
@@ -212,6 +210,7 @@ export class BrowserExecutor {
     for (const session of this.#sessions.values())
       session.interrupted = true;
     await Promise.all([...this.#sessions.keys()].map(sessionId => this.finalizeSession(sessionId)));
+    await this.#relay.releaseCDP?.().catch(() => {});
     await this.#browser?.close().catch(() => {});
     this.#browser = undefined;
     this.#context = undefined;
@@ -242,15 +241,31 @@ export class BrowserExecutor {
   }
 
   async #callSingle(sessionId, session, name, args, signal) {
+    await this.#ensureBootstrapTab(sessionId, session, name, signal);
     const prepared = await this.#prepareCall(sessionId, session, name, args, signal);
     const result = await session.backend.callTool(name, prepared.args, signal);
-    if (!result?.isError)
+    if (!result?.isError) {
       await this.#syncExtensionState(sessionId, name, prepared.args, prepared.nativeTabId, prepared.claimedTab);
+      if (name === 'browser_tabs' && ['new', 'claim', 'select'].includes(String(prepared.args.action || '')))
+        session.bootstrapPending = false;
+    }
     if (name === 'browser_tabs' && prepared.args.action !== 'finalize') {
       const discoveredTabs = prepared.discoveredTabs || await this.#discoverTabs();
       this.#decorateTabListResult(sessionId, session, result, discoveredTabs);
     }
     return result;
+  }
+
+  async #ensureBootstrapTab(sessionId, session, name, signal) {
+    if (!session.bootstrapPending || !requiresBootstrapTab(name))
+      return;
+    const result = await session.backend.callTool('browser_tabs', {
+      action: 'new',
+      url: `${this.#bootstrapUrl}#${sessionId}`,
+    }, signal);
+    if (result?.isError)
+      throw new Error('无法为浏览器操作创建初始标签页');
+    session.bootstrapPending = false;
   }
 
   async #callBatch(sessionId, session, rawArgs, signal) {
@@ -380,7 +395,7 @@ export class BrowserExecutor {
     decorateTabListResult(sessionId, session, result, discoveredTabs);
   }
 
-  async #withOwnershipLock(callback: () => Promise<unknown>) {
+  async #withOwnershipLock<T>(callback: () => Promise<T>): Promise<T> {
     const previous = this.#ownershipQueue;
     let release!: () => void;
     const gate = new Promise<void>(resolve => release = resolve);
@@ -419,6 +434,10 @@ function isOwnershipSensitive(name, args) {
   if (name !== 'browser_batch' || !Array.isArray(args.actions))
     return false;
   return args.actions.some(action => action?.name === 'browser_tabs');
+}
+
+function requiresBootstrapTab(name) {
+  return !['browser_close', 'browser_session_name', 'browser_tabs', 'browser_visibility'].includes(name);
 }
 
 function defaultSessionName(value) {
