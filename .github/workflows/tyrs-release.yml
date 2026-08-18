@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.3.13
+  TYRS_PLAYWRIGHT_RELEASE: tyrs-v0.3.18
 
 jobs:
   release:

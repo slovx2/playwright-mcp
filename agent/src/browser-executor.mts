@@ -56,7 +56,7 @@ export class BrowserExecutor {
   }
 
   async start() {
-    await this.#relay.discoverTabs();
+    await this.#readNativeTabMetadata();
     this.#browser = await chromium.connectOverCDP(this.#relay.cdpEndpoint(), {
       isLocal: true,
       timeout: 0,
@@ -89,7 +89,11 @@ export class BrowserExecutor {
         isolatedTabs: true,
         protectSensitiveData: true,
         timeouts: { action: 5_000, navigation: 60_000, expect: 5_000 },
-      }, this.#context, this.#browserTools);
+      }, this.#context, this.#browserTools, {
+        sessionId,
+        listTabs: async () => normalizeTabMetadata(await this.#discoverTabs()),
+        invalidate: reason => this.#relay.closeCDPConnection?.(reason),
+      });
       await backend.initialize({
         clientName: String(message.clientName || 'Tyrs Browser'),
         cwd: workspace,
@@ -216,6 +220,24 @@ export class BrowserExecutor {
     this.#context = undefined;
   }
 
+  async abandonMetadataFailure() {
+    const sessions = [...this.#sessions.entries()];
+    this.#sessions.clear();
+    for (const [, session] of sessions) {
+      session.interrupted = true;
+      for (const controller of session.controllers.values())
+        controller.abort(new Error('BROWSER_METADATA_UNAVAILABLE'));
+    }
+    await Promise.all(sessions.map(async ([, session]) => {
+      await session.backend.dispose().catch(() => {});
+      await fs.promises.rm(session.workspace, { recursive: true, force: true }).catch(() => {});
+    }));
+    void this.#relay.extensionCommand('tyrs.sessions.reset', []).catch(() => {});
+    void this.#browser?.close().catch(() => {});
+    this.#browser = undefined;
+    this.#context = undefined;
+  }
+
   async #syncExtensionState(sessionId, name, args, nativeTabId?: number, claimedTab?: { title: string; url: string }) {
     if (name === 'browser_session_name')
       await this.#relay.extensionCommand('tyrs.session.name', [{ sessionId, name: String(args.name || '') }]);
@@ -240,9 +262,13 @@ export class BrowserExecutor {
       await this.#relay.extensionCommand('tyrs.session.finalize', [{ sessionId }]);
   }
 
-  async #callSingle(sessionId, session, name, args, signal) {
-    await this.#ensureBootstrapTab(sessionId, session, name, signal);
-    const prepared = await this.#prepareCall(sessionId, session, name, args, signal);
+  async #callSingle(sessionId, session, name, args, signal, callMetadata?) {
+    const bootstrapped = await this.#ensureBootstrapTab(sessionId, session, name, signal, callMetadata);
+    const metadata = callMetadata ?? (bootstrapped ? session.backend.lastTabMetadata?.() : undefined);
+    const prepared = await this.#prepareCall(sessionId, session, name, args, signal, metadata);
+    const discoveredTabs = metadata || prepared.discoveredTabs;
+    if (discoveredTabs)
+      session.backend.primeTabMetadata?.(normalizeTabMetadata(discoveredTabs));
     const result = await session.backend.callTool(name, prepared.args, signal);
     if (!result?.isError) {
       await this.#syncExtensionState(sessionId, name, prepared.args, prepared.nativeTabId, prepared.claimedTab);
@@ -250,15 +276,17 @@ export class BrowserExecutor {
         session.bootstrapPending = false;
     }
     if (name === 'browser_tabs' && prepared.args.action !== 'finalize') {
-      const discoveredTabs = prepared.discoveredTabs || await this.#discoverTabs();
-      this.#decorateTabListResult(sessionId, session, result, discoveredTabs);
+      const resultMetadata = discoveredTabs || session.backend.lastTabMetadata?.() || [];
+      this.#decorateTabListResult(sessionId, session, result, resultMetadata);
     }
     return result;
   }
 
-  async #ensureBootstrapTab(sessionId, session, name, signal) {
+  async #ensureBootstrapTab(sessionId, session, name, signal, callMetadata?) {
     if (!session.bootstrapPending || !requiresBootstrapTab(name))
-      return;
+      return false;
+    if (callMetadata)
+      session.backend.primeTabMetadata?.(normalizeTabMetadata(callMetadata));
     const result = await session.backend.callTool('browser_tabs', {
       action: 'new',
       url: `${this.#bootstrapUrl}#${sessionId}`,
@@ -266,6 +294,7 @@ export class BrowserExecutor {
     if (result?.isError)
       throw new Error('无法为浏览器操作创建初始标签页');
     session.bootstrapPending = false;
+    return true;
   }
 
   async #callBatch(sessionId, session, rawArgs, signal) {
@@ -281,6 +310,7 @@ export class BrowserExecutor {
     let failed = false;
     let close = false;
     const startedAt = performance.now();
+    let callMetadata;
     for (let index = 0; index < actions.length; index++) {
       if (signal.aborted)
         throw signal.reason ?? new Error('Browser batch was cancelled');
@@ -293,7 +323,8 @@ export class BrowserExecutor {
         failed = true;
         break;
       }
-      const result = await this.#callSingle(sessionId, session, name, args, signal);
+      const result = await this.#callSingle(sessionId, session, name, args, signal, callMetadata);
+      callMetadata ??= session.backend.lastTabMetadata?.();
       const text = result.content?.filter(item => item.type === 'text')
           .map(item => item.text).join('\n') || '';
       steps.push({
@@ -328,20 +359,40 @@ export class BrowserExecutor {
   }
 
   async #discoverTabs() {
-    const { count: expectedPageCount, tabs } = await this.#relay.discoverTabs();
+    const { count: expectedPageCount, tabs } = await this.#readNativeTabMetadata();
     await waitForPageDiscovery(this.#context, expectedPageCount);
     return tabs;
   }
 
-  async #prepareCall(sessionId, session, name, rawArgs, signal) {
+  async #readNativeTabMetadata() {
+    const startedAt = performance.now();
+    let timer;
+    try {
+      return await Promise.race([
+        this.#relay.discoverTabs(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('metadata timeout')), 5_000);
+        }),
+      ]) as any;
+    } catch {
+      const durationMs = Math.round(performance.now() - startedAt);
+      this.#relay.closeCDPConnection?.('BROWSER_METADATA_UNAVAILABLE');
+      throw new Error(`BROWSER_METADATA_UNAVAILABLE stage=discoverTabs durationMs=${durationMs}`);
+    } finally {
+      if (timer)
+        clearTimeout(timer);
+    }
+  }
+
+  async #prepareCall(sessionId, session, name, rawArgs, signal, callMetadata?) {
     const args = { ...rawArgs };
     const action = String(args.action || '');
     const controlledAction = name === 'browser_tabs' &&
       ['close', 'select', 'mark_deliverable', 'mark_handoff'].includes(action) && args.tabId;
     const requiresDiscovery = name === 'browser_tabs' &&
-      (action === 'list' || action === 'claim' || controlledAction) ||
+      (action === 'claim' || controlledAction) ||
       (name === 'browser_visibility' && args.tabId);
-    const discoveredTabs = requiresDiscovery ? await this.#discoverTabs() : undefined;
+    const discoveredTabs = requiresDiscovery ? (callMetadata || await this.#discoverTabs()) : undefined;
 
     if (name === 'browser_tabs' && action === 'claim') {
       const claimToken = String(args.claimToken || '');
@@ -378,6 +429,7 @@ export class BrowserExecutor {
     }
     let backendTabId = session.tabIds.get(stableTabId);
     if (!backendTabId) {
+      session.backend.primeTabMetadata?.(normalizeTabMetadata(discoveredTabs || []));
       const listed = await session.backend.callTool(
           'browser_tabs', { action: 'list' }, signal);
       if (listed?.isError)
@@ -519,6 +571,9 @@ export function decorateTabListResult(sessionId, session, result, discoveredTabs
       parsed.value.currentTabId = stableId;
     const origin = native.tyrs?.origin || 'user';
     tab.tabId = stableId;
+    tab.title = String(native.title || '');
+    tab.url = String(native.url || '');
+    tab.current = native.active === true;
     tab.origin = origin;
     tab.source = origin;
     tab.session = native.tyrs?.sessionName;
@@ -527,17 +582,33 @@ export function decorateTabListResult(sessionId, session, result, discoveredTabs
       ownerSessionId: native.tyrs.sessionId,
       ownedByCurrentSession: native.tyrs.sessionId === sessionId,
     } : null;
+    if (native.active)
+      parsed.value.currentTabId = stableId;
   }
   for (const tab of parsed.value.userTabs) {
     const match = matchDiscoveredTab(sessionId, tab, discoveredTabs, unused);
     if (match === undefined)
       continue;
     unused.delete(match);
+    const native = discoveredTabs[match];
+    tab.title = String(native.title || '');
+    tab.url = String(native.url || '');
+    tab.current = native.active === true;
     if (typeof tab.claimToken === 'string')
-      session.claimTokens.set(tab.claimToken, `chrome-tab:${discoveredTabs[match].id}`);
+      session.claimTokens.set(tab.claimToken, `chrome-tab:${native.id}`);
   }
   parsed.item.text = `${parsed.item.text.slice(0, parsed.start)}` +
     `${JSON.stringify(parsed.value, null, 2)}${parsed.item.text.slice(parsed.end)}`;
+}
+
+function normalizeTabMetadata(tabs) {
+  return tabs.map(tab => ({
+    id: tab.id,
+    title: String(tab.title || ''),
+    url: String(tab.url || ''),
+    active: tab.active === true,
+    tyrs: tab.tyrs,
+  }));
 }
 
 function matchDiscoveredTab(sessionId, tab, discoveredTabs, unused: Set<number>) {
@@ -547,7 +618,12 @@ function matchDiscoveredTab(sessionId, tab, discoveredTabs, unused: Set<number>)
     return undefined;
   const ownershipCandidates = urlCandidates.filter(index =>
     ownershipMatches(sessionId, tab, discoveredTabs[index].tyrs));
-  const preferred = ownershipCandidates.length ? ownershipCandidates : urlCandidates;
+  const hasOwnershipMetadata = urlCandidates.some(index => {
+    const state = discoveredTabs[index].tyrs;
+    return !!(state?.sessionId || state?.origin);
+  });
+  const preferred = ownershipCandidates.length ? ownershipCandidates :
+    (hasOwnershipMetadata ? [] : urlCandidates);
   const titleCandidates = preferred.filter(index => {
     const nativeTitle = String(discoveredTabs[index].title || '');
     const backendTitle = String(tab.title || '');

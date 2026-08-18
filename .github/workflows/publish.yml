@@ -44,7 +44,7 @@ jobs:
         run: npm publish --tag next
 
   publish-mcp-release-npm:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' && !startsWith(github.event.release.tag_name, 'tyrs-v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,7 +67,8 @@ jobs:
     # is skipped — the always() + result check lets this job still run).
     if: |
       always() &&
-      (github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
+      ((github.event_name == 'release' && !startsWith(github.event.release.tag_name, 'tyrs-v')) ||
+        github.event_name == 'workflow_dispatch') &&
       needs.publish-mcp-release-npm.result != 'failure' &&
       needs.publish-mcp-release-npm.result != 'cancelled'
     needs: publish-mcp-release-npm
@@ -109,7 +110,7 @@ jobs:
         run: ./mcp-publisher publish
 
   publish-mcp-release-docker:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' && !startsWith(github.event.release.tag_name, 'tyrs-v')
     runs-on: ubuntu-latest
     permissions:
       contents: read

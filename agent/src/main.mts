@@ -322,8 +322,10 @@ async function handleServiceClose(message, stream) {
 
 async function executeRemoteTool(message, stream) {
   const startedAt = performance.now();
+  let executor: BrowserExecutor | undefined;
   try {
-    const executed = await (await ensureExecutor()).callTool(message);
+    executor = await ensureExecutor();
+    const executed = await executor.callTool(message);
     if (remoteStream !== stream || message.generation !== remoteGeneration)
       return;
     const result = await toolArtifacts.externalize(stream, message, executed.result);
@@ -337,6 +339,10 @@ async function executeRemoteTool(message, stream) {
       timings: { ...executed.timings,
         agentTotalMs: Math.round((performance.now() - startedAt) * 100) / 100 },
     });
+    if (executed.result?.isClose) {
+      const metadataUnavailable = JSON.stringify(executed.result).includes('BROWSER_METADATA_UNAVAILABLE');
+      await stopBrowserExecutor(true, executor, metadataUnavailable);
+    }
   } catch (error) {
     if (remoteStream !== stream)
       return;
@@ -346,6 +352,7 @@ async function executeRemoteTool(message, stream) {
         reason: 'Browser use was stopped by the user' }).catch(() => {});
       return;
     }
+    const metadataUnavailable = String(error).includes('BROWSER_METADATA_UNAVAILABLE');
     await stream.send({
       type: 'tool_result',
       sessionId: message.sessionId,
@@ -353,9 +360,12 @@ async function executeRemoteTool(message, stream) {
       result: {
         content: [{ type: 'text', text: `### Error\n${error instanceof Error ? error.message : String(error)}` }],
         isError: true,
+        ...(metadataUnavailable ? { isClose: true } : {}),
       },
       timings: { agentTotalMs: Math.round((performance.now() - startedAt) * 100) / 100 },
     }).catch(() => {});
+    if (metadataUnavailable)
+      await stopBrowserExecutor(true, executor, true);
   }
 }
 
@@ -389,13 +399,17 @@ async function ensureExecutor(): Promise<BrowserExecutor> {
   });
 }
 
-async function stopBrowserExecutor(force: boolean): Promise<void> {
+async function stopBrowserExecutor(force: boolean, expected?: BrowserExecutor,
+    abandonMetadataFailure = false): Promise<void> {
   await queueBrowserExecutorLifecycle(async () => {
     const executor = browserExecutor;
+    if (expected && executor !== expected)
+      return;
     if (!executor || (!force && executor.sessionIds().length > 0))
       return;
     browserExecutor = undefined;
-    await executor.stop().catch(error => log(error));
+    const stopping = abandonMetadataFailure ? executor.abandonMetadataFailure() : executor.stop();
+    await stopping.catch(error => log(error));
   });
 }
 
