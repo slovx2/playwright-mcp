@@ -9,8 +9,8 @@ type Session = {
   bootstrapPending: boolean;
   queue: Promise<void>;
   controllers: Map<string, AbortController>;
+  activeRequestId?: string;
   workspace: string;
-  interrupted: boolean;
   timing?: { cdpCount: number; cdpMs: number };
   tabIds: Map<string, string>;
   claimTokens: Map<string, string>;
@@ -108,7 +108,6 @@ export class BrowserExecutor {
         queue: Promise.resolve(),
         controllers: new Map(),
         workspace,
-        interrupted: false,
         tabIds: new Map(),
         claimTokens: new Map(),
       });
@@ -129,9 +128,6 @@ export class BrowserExecutor {
       throw new Error('Browser session is not open');
     const requestedName = String(message.name || '');
     const requestedArgs = message.arguments || {};
-    const resumesControl = requestedName === 'browser_tabs' && requestedArgs.action === 'claim';
-    if (session.interrupted && !resumesControl)
-      throw new Error('BROWSER_CONTROL_INTERRUPTED: explicit browser_tabs claim is required to resume');
     const controller = new AbortController();
     session.controllers.set(requestId, controller);
     const queuedAt = performance.now();
@@ -139,6 +135,7 @@ export class BrowserExecutor {
       if (Number(message.deadlineMs) <= Date.now())
         throw new Error('Browser tool deadline elapsed before execution');
       this.#activeSessionIds.add(sessionId);
+      session.activeRequestId = requestId;
       const executionStartedAt = performance.now();
       session.timing = { cdpCount: 0, cdpMs: 0 };
       try {
@@ -147,8 +144,7 @@ export class BrowserExecutor {
         const result = name === 'browser_batch' ?
           await this.#callBatch(sessionId, session, requestedArgs, controller.signal) :
           await this.#callSingle(sessionId, session, name, requestedArgs, controller.signal);
-        if (resumesControl && !result?.isError)
-          session.interrupted = false;
+        controller.signal.throwIfAborted();
         const timing = session.timing;
         return {
           result,
@@ -163,6 +159,8 @@ export class BrowserExecutor {
       } finally {
         await this.#relay.extensionCommand('tyrs.session.idle', [{ sessionId }]).catch(() => {});
         session.controllers.delete(requestId);
+        if (session.activeRequestId === requestId)
+          session.activeRequestId = undefined;
         this.#activeSessionIds.delete(sessionId);
         session.timing = undefined;
       }
@@ -180,13 +178,12 @@ export class BrowserExecutor {
     session?.controllers.get(String(message.requestId || ''))?.abort(new Error(String(message.reason || 'cancelled')));
   }
 
-  interrupt(sessionId, reason = 'Browser use was stopped by the user') {
+  interruptActiveCall(sessionId, reason = 'Browser control yielded to the user') {
     const session = this.#sessions.get(sessionId);
-    if (!session)
+    if (!session?.activeRequestId)
       return;
-    session.interrupted = true;
-    for (const controller of session.controllers.values())
-      controller.abort(new Error(`BROWSER_CONTROL_INTERRUPTED: ${reason}`));
+    session.controllers.get(session.activeRequestId)?.abort(
+        new Error(`BROWSER_CONTROL_INTERRUPTED: ${reason}`));
   }
 
   async finalizeSession(sessionId) {
@@ -211,8 +208,6 @@ export class BrowserExecutor {
   }
 
   async stop() {
-    for (const session of this.#sessions.values())
-      session.interrupted = true;
     await Promise.all([...this.#sessions.keys()].map(sessionId => this.finalizeSession(sessionId)));
     await this.#relay.releaseCDP?.().catch(() => {});
     await this.#browser?.close().catch(() => {});
@@ -224,7 +219,6 @@ export class BrowserExecutor {
     const sessions = [...this.#sessions.entries()];
     this.#sessions.clear();
     for (const [, session] of sessions) {
-      session.interrupted = true;
       for (const controller of session.controllers.values())
         controller.abort(new Error('BROWSER_METADATA_UNAVAILABLE'));
     }

@@ -125,6 +125,86 @@ test('creates the bootstrap tab only when an operation needs a page', async () =
   await executor.finalizeSession(sessionId);
 });
 
+test('user takeover interrupts only the active call and does not persist', async () => {
+  let started;
+  let finish;
+  const visibilityStarted = new Promise(resolve => started = resolve);
+  const visibilityFinished = new Promise(resolve => finish = resolve);
+  class Backend {
+    async initialize() {}
+    async callTool(name, args) {
+      if (name === 'browser_tabs' && args.action === 'list')
+        return resultFor([], []);
+      return { content: [{ type: 'text', text: '{}' }] };
+    }
+    lastTabMetadata() { return []; }
+    async dispose() {}
+  }
+  const relay = { async extensionCommand(method) {
+    if (method === 'tyrs.visibility') {
+      started();
+      await visibilityFinished;
+    }
+    return {};
+  } };
+  const executor = new BrowserExecutor(relay, {
+    BrowserBackend: Backend,
+    browserTools: [],
+  }, { bootstrapUrl: 'http://127.0.0.1:8931/browser-bootstrap' });
+  await executor.openSession({ sessionId, clientName: 'Test' });
+  const otherSessionId = '77777777-7777-4777-8777-777777777777';
+  await executor.openSession({ sessionId: otherSessionId, clientName: 'Other' });
+
+  const visibility = executor.callTool({
+    sessionId,
+    requestId: '44444444-4444-4444-8444-444444444444',
+    deadlineMs: Date.now() + 10_000,
+    name: 'browser_visibility',
+    arguments: { visible: true },
+  });
+  const queuedList = executor.callTool({
+    sessionId,
+    requestId: '55555555-5555-4555-8555-555555555555',
+    deadlineMs: Date.now() + 10_000,
+    name: 'browser_tabs',
+    arguments: { action: 'list' },
+  });
+  const otherList = executor.callTool({
+    sessionId: otherSessionId,
+    requestId: '88888888-8888-4888-8888-888888888888',
+    deadlineMs: Date.now() + 10_000,
+    name: 'browser_tabs',
+    arguments: { action: 'list' },
+  });
+  await visibilityStarted;
+  executor.interruptActiveCall(sessionId, 'Browser control yielded to the user (wheel)');
+  finish();
+
+  await assert.rejects(visibility, /BROWSER_CONTROL_INTERRUPTED: Browser control yielded to the user \(wheel\)/);
+  assert.equal((await queuedList).result.isError, undefined);
+  assert.equal((await otherList).result.isError, undefined);
+
+  executor.interruptActiveCall(sessionId, 'Browser control yielded to the user (pointerdown)');
+  const nextList = await executor.callTool({
+    sessionId,
+    requestId: '66666666-6666-4666-8666-666666666666',
+    deadlineMs: Date.now() + 10_000,
+    name: 'browser_tabs',
+    arguments: { action: 'list' },
+  });
+  assert.equal(nextList.result.isError, undefined);
+  const snapshot = await executor.callTool({
+    sessionId,
+    requestId: '99999999-9999-4999-8999-999999999999',
+    deadlineMs: Date.now() + 10_000,
+    name: 'browser_snapshot',
+    arguments: {},
+  });
+  assert.equal(snapshot.result.isError, undefined);
+  await executor.finalizeSession(sessionId);
+  await executor.finalizeSession(otherSessionId);
+});
+
 test('metadata failure abandons sessions without waiting for CDP release', async () => {
   let disposed = 0;
   let reset = 0;

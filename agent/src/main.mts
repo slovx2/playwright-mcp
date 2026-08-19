@@ -346,19 +346,22 @@ async function executeRemoteTool(message, stream) {
   } catch (error) {
     if (remoteStream !== stream)
       return;
-    const interrupted = String(error).includes('BROWSER_CONTROL_INTERRUPTED');
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const interrupted = errorMessage.includes('BROWSER_CONTROL_INTERRUPTED');
     if (interrupted) {
+      const reason = errorMessage.slice(errorMessage.indexOf('BROWSER_CONTROL_INTERRUPTED') +
+        'BROWSER_CONTROL_INTERRUPTED'.length).replace(/^:\s*/, '') || 'Browser control yielded to the user';
       await stream.send({ type: 'session_interrupted', sessionId: message.sessionId,
-        reason: 'Browser use was stopped by the user' }).catch(() => {});
+        reason }).catch(() => {});
       return;
     }
-    const metadataUnavailable = String(error).includes('BROWSER_METADATA_UNAVAILABLE');
+    const metadataUnavailable = errorMessage.includes('BROWSER_METADATA_UNAVAILABLE');
     await stream.send({
       type: 'tool_result',
       sessionId: message.sessionId,
       requestId: message.requestId,
       result: {
-        content: [{ type: 'text', text: `### Error\n${error instanceof Error ? error.message : String(error)}` }],
+        content: [{ type: 'text', text: `### Error\n${errorMessage}` }],
         isError: true,
         ...(metadataUnavailable ? { isClose: true } : {}),
       },
@@ -374,9 +377,8 @@ async function handleTakeover(params) {
   const sessionId = String(details.sessionId || browserExecutor?.currentSessionId() || '');
   if (!sessionId)
     return;
-  browserExecutor?.interrupt(sessionId, 'Browser use was stopped by the user');
-  await remoteStream?.send({ type: 'session_interrupted', sessionId,
-    reason: 'Browser use was stopped by the user' }).catch(() => {});
+  const kind = String(details.kind || 'input');
+  browserExecutor?.interruptActiveCall(sessionId, `Browser control yielded to the user (${kind})`);
 }
 
 async function ensureExecutor(): Promise<BrowserExecutor> {
