@@ -5,6 +5,8 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { deriveScopedToken } from '../src/auth.mjs';
 
 test('health is public while MCP requires a bearer token', async () => {
@@ -30,9 +32,22 @@ test('health is public while MCP requires a bearer token', async () => {
   }
 });
 
-test('extension proxy is prewarmed on its dedicated port and validates the token', async () => {
+test('extension proxy starts on demand and validates the token', async () => {
   const bridge = await startBridge();
+  let client;
+  let browserCall;
+  let accepted;
   try {
+    await assert.rejects(connectWebSocket(`${bridge.proxyURL}/extension?token=wrong`, 1),
+        /WebSocket connection failed/);
+    client = new Client({ name: 'bridge test', version: '1.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(bridge.url('/mcp')), {
+      requestInit: { headers: {
+        authorization: `Bearer ${deriveScopedToken('mcp-secret', 'worker')}`,
+      } },
+    });
+    await client.connect(transport);
+    browserCall = client.callTool({ name: 'browser_tabs', arguments: { action: 'list' } }).catch(() => undefined);
     const denied = await connectWebSocket(`${bridge.proxyURL}/extension?token=wrong`);
     assert.equal((await waitForWebSocketClose(denied)).code, 4001);
     const wrongPath = await connectWebSocket(`${bridge.proxyURL}/wrong?token=extension-secret`);
@@ -40,17 +55,13 @@ test('extension proxy is prewarmed on its dedicated port and validates the token
     const stale = await connectWebSocket(`${bridge.proxyURL}/extension?token=extension-secret`);
     assert.equal((await waitForWebSocketClose(stale)).code, 4002);
     const handshake = 'token=extension-secret&extensionVersion=0.3.8&extensionProtocol=2&capabilityVersion=1';
-    const accepted = await connectWebSocket(`${bridge.proxyURL}/extension?${handshake}`);
+    accepted = await connectWebSocket(`${bridge.proxyURL}/extension?${handshake}`);
     accepted.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
     assert.equal(accepted.readyState, WebSocket.OPEN);
-    const acceptedClose = waitForWebSocketClose(accepted);
-    accepted.close();
-    await acceptedClose;
-    const reconnected = await connectWebSocket(`${bridge.proxyURL}/extension?${handshake}`);
-    reconnected.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
-    assert.equal(reconnected.readyState, WebSocket.OPEN);
-    reconnected.close();
   } finally {
+    accepted?.close();
+    await client?.close();
+    await browserCall;
     await bridge.close();
   }
 });
@@ -137,6 +148,7 @@ async function startBridge(options = {}) {
     cwd: new URL('../..', import.meta.url), stdio: 'ignore', env: fixture.env,
   });
   await waitForHealth(`http://127.0.0.1:${fixture.publicPort}/health`);
+  await waitForMCP(`http://127.0.0.1:${fixture.publicPort}/mcp`);
   return {
     publicPort: fixture.publicPort,
     proxyPort: fixture.proxyPort,
@@ -193,9 +205,9 @@ async function createFixture(options = {}) {
   };
 }
 
-async function connectWebSocket(url) {
+async function connectWebSocket(url, attempts = 40) {
   let lastError;
-  for (let attempt = 0; attempt < 40; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       return await new Promise((resolve, reject) => {
         const socket = new WebSocket(url);
@@ -256,4 +268,22 @@ async function waitForAgentHealth(url) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error('Browser Agent registry did not become healthy');
+}
+
+async function waitForMCP(url) {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${deriveScopedToken('mcp-secret', 'worker')}`,
+          'content-type': 'application/json' },
+        body: '{}',
+      });
+      if (response.status !== 502)
+        return;
+    } catch {
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('MCP server did not become healthy');
 }
