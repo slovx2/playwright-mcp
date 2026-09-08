@@ -50,3 +50,25 @@ test('small ordinary text remains in the tool result frame', async () => {
   }, { content: [{ type: 'text', text: 'clicked' }] });
   assert.deepEqual(result.content, [{ type: 'text', text: 'clicked' }]);
 });
+
+test('failing one worker stream leaves another artifact transfer pending', async () => {
+  const sender = new ToolArtifactSender();
+  const streams = [
+    { messages: [], async send(message) { this.messages.push(message); } },
+    { messages: [], async send(message) { this.messages.push(message); } },
+  ];
+  const request = stream => ({ sessionId: crypto.randomUUID(), requestId: crypto.randomUUID(),
+    name: 'browser_snapshot', arguments: {}, stream });
+  const result1 = sender.externalize(streams[0], request(streams[0]), {
+    content: [{ type: 'text', text: 'worker A'.repeat(100_000) }],
+  });
+  const result2 = sender.externalize(streams[1], request(streams[1]), {
+    content: [{ type: 'text', text: 'worker B'.repeat(100_000) }],
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  sender.failPending(new Error('worker A disconnected'), streams[0]);
+  await assert.rejects(result1, /worker A disconnected/);
+  const transferId = streams[1].messages.find(message => message.type === 'artifact_end').transferId;
+  sender.handleMessage({ type: 'artifact_ack', transferId }, streams[1]);
+  await result2;
+});

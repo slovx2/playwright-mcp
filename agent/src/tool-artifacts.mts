@@ -5,6 +5,7 @@ const maxChunkBytes = 1024 * 1024;
 const largeTextThreshold = 256 * 1024;
 
 type PendingAck = {
+  stream: any;
   resolve: () => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -13,12 +14,12 @@ type PendingAck = {
 export class ToolArtifactSender {
   #pendingAcks = new Map<string, PendingAck>();
 
-  handleMessage(message) {
+  handleMessage(message, stream?: any) {
     if (message.type !== 'artifact_ack')
       return false;
     const transferId = String(message.transferId || '');
     const pending = this.#pendingAcks.get(transferId);
-    if (!pending)
+    if (!pending || (stream && pending.stream !== stream))
       return true;
     this.#pendingAcks.delete(transferId);
     clearTimeout(pending.timer);
@@ -39,7 +40,7 @@ export class ToolArtifactSender {
       if (data.buffer.length > maxArtifactBytes)
         throw new Error(`Browser tool artifact exceeds ${maxArtifactBytes} bytes`);
       const transferId = crypto.randomUUID();
-      const ack = this.#waitForAck(transferId);
+      const ack = this.#waitForAck(transferId, stream);
       try {
         await stream.send({
           type: 'artifact_begin',
@@ -73,18 +74,20 @@ export class ToolArtifactSender {
     return { ...result, content };
   }
 
-  failPending(error) {
-    for (const transferId of this.#pendingAcks.keys())
-      this.#rejectAck(transferId, error);
+  failPending(error, stream?: any) {
+    for (const [transferId, pending] of this.#pendingAcks) {
+      if (!stream || pending.stream === stream)
+        this.#rejectAck(transferId, error);
+    }
   }
 
-  #waitForAck(transferId: string) {
+  #waitForAck(transferId: string, stream: any) {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pendingAcks.delete(transferId);
         reject(new Error('Browser tool artifact acknowledgement timed out'));
       }, 30_000);
-      this.#pendingAcks.set(transferId, { resolve, reject, timer });
+      this.#pendingAcks.set(transferId, { stream, resolve, reject, timer });
     });
   }
 

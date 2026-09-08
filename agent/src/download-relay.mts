@@ -10,7 +10,7 @@ export class DownloadRelay {
   #getSessionId: () => string;
   #downloads: any[] = [];
   #items: any[] = [];
-  #acks = new Map<string, { resolve: () => void, reject: (error: unknown) => void }>();
+  #acks = new Map<string, { stream: any, resolve: () => void, reject: (error: unknown) => void }>();
 
   constructor(relay, getStream, getSessionId = () => '') {
     this.#relay = relay;
@@ -61,21 +61,24 @@ export class DownloadRelay {
     }
   }
 
-  handleAgentMessage(message) {
+  handleAgentMessage(message, stream?: any) {
     if (message.type !== 'download_ack')
       return false;
     const callback = this.#acks.get(String(message.transferId || ''));
-    if (callback) {
+    if (callback && (!stream || callback.stream === stream)) {
       this.#acks.delete(String(message.transferId));
       callback.resolve();
     }
     return true;
   }
 
-  failPending(error) {
-    for (const callback of this.#acks.values())
-      callback.reject(error);
-    this.#acks.clear();
+  failPending(error, stream?: any) {
+    for (const [transferId, callback] of this.#acks) {
+      if (!stream || callback.stream === stream) {
+        callback.reject(error);
+        this.#acks.delete(transferId);
+      }
+    }
   }
 
   #pair() {
@@ -129,7 +132,7 @@ export class DownloadRelay {
         digest.update(chunk);
         await stream.send({ type: 'download_chunk', transferId, data: chunk.toString('base64') });
       }
-      acknowledgement = this.#expectAcknowledgement(transferId);
+      acknowledgement = this.#expectAcknowledgement(transferId, stream);
       await stream.send({ type: 'download_end', transferId, sha256: digest.digest('hex') });
       await acknowledgement;
     } catch (error) {
@@ -143,13 +146,14 @@ export class DownloadRelay {
     }
   }
 
-  #expectAcknowledgement(transferId) {
+  #expectAcknowledgement(transferId, stream) {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#acks.delete(transferId);
         reject(new Error('Worker 下载确认超时'));
       }, 60_000);
       this.#acks.set(transferId, {
+        stream,
         resolve: () => { clearTimeout(timer); resolve(); },
         reject: error => { clearTimeout(timer); reject(error); },
       });

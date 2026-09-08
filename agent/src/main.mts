@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { BrowserExecutor } from './browser-executor.mjs';
+import { AgentConfig, WorkerConfig, validateConfig } from './config.mjs';
 import { DownloadRelay } from './download-relay.mjs';
 import { SSHSupervisor } from './ssh-supervisor.mjs';
 import { ServiceTunnels } from './service-tunnels.mjs';
@@ -25,13 +26,12 @@ if (!/^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/.test(agentVersion) ||
 
 const configPath = process.env.TYRS_BROWSER_AGENT_CONFIG || path.join(os.homedir(),
     'Library', 'Application Support', 'Tyrs Hand', 'browser-agent', 'config.json');
-const config = validateConfig(JSON.parse(await fs.promises.readFile(configPath, 'utf8')));
+const config: AgentConfig = validateConfig(JSON.parse(await fs.promises.readFile(configPath, 'utf8')));
 process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = config.extensionToken;
 process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION = extensionVersion;
 process.env.PLAYWRIGHT_EXTENSION_PROTOCOL = '2';
 process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION = '1';
 
-let remoteStream;
 const capabilityVersion = 2;
 let extensionStatus = { connected: false, tabCount: 0, extensionVersion: '',
   extensionProtocol: 2, capabilityVersion: 1, chromeVersion: '', reason: 'Chrome extension 未连接' };
@@ -40,22 +40,44 @@ let restartingRelay;
 let relayConnected = false;
 let browserExecutor: BrowserExecutor | undefined;
 let browserExecutorLifecycle: Promise<void> = Promise.resolve();
-let remoteGeneration = '';
-let lastRemoteMessageAt = 0;
-let remoteControlQueue = Promise.resolve();
+type WorkerConnection = {
+  id: string;
+  worker: WorkerConfig;
+  supervisor: SSHSupervisor;
+  stream?: any;
+  generation: string;
+  sessions: Set<string>;
+  services: Set<string>;
+  serviceTunnels: ServiceTunnels;
+  status: 'connecting' | 'connected' | 'disconnected' | 'incompatible';
+  lastError?: string;
+  lastConnectedAt?: string;
+  lastRemoteMessageAt: number;
+  remoteControlQueue: Promise<void>;
+};
+const workerConnections = new Map<string, WorkerConnection>();
+const sessionOwners = new Map<string, WorkerConnection>();
+const serviceOwners = new Map<string, WorkerConnection>();
 const toolArtifacts = new ToolArtifactSender();
-const serviceTunnels = new ServiceTunnels(config, (serviceId, activeConnections) => {
-  void remoteStream?.send({
-    type: 'service_activity', generation: remoteGeneration, serviceId, activeConnections,
-  }).catch(error => log(error));
-}, message => message && log(message));
 
 const publicServer = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', 'http://localhost');
     if (url.pathname === '/health')
-      return sendJSON(response, 200, { agentVersion, sshConnected: Boolean(remoteStream),
-        ...extensionStatus, connected: extensionStatus.connected && relayConnected });
+      return sendJSON(response, 200, {
+        agentVersion,
+        sshConnected: [...workerConnections.values()].some(connection => Boolean(connection.stream)),
+        workers: [...workerConnections.values()].map(connection => ({
+          id: connection.id,
+          sshConnected: Boolean(connection.stream),
+          status: connection.status,
+          sessionCount: connection.sessions.size,
+          lastError: connection.lastError,
+          lastConnectedAt: connection.lastConnectedAt,
+        })),
+        ...extensionStatus,
+        connected: extensionStatus.connected && relayConnected,
+      });
     if (url.pathname === '/browser-bootstrap') {
       const data = '<!doctype html><meta charset="utf-8"><title>Tyrs Browser</title>';
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8',
@@ -123,48 +145,91 @@ const publicServer = http.createServer(async (request, response) => {
 await listen(publicServer, config.publicPort);
 await restartRelay();
 
-const supervisor = new SSHSupervisor(config, {
-  onConnection: stream => {
-    remoteStream = stream;
-    remoteControlQueue = Promise.resolve();
-    lastRemoteMessageAt = Date.now();
-    stream.on('message', message => {
-      const ordered = ['welcome', 'session_open', 'session_finalize', 'service_open',
-        'service_close', 'service_reset'].includes(message.type);
-      const task = ordered ?
-        (remoteControlQueue = remoteControlQueue.then(() => handleRemoteMessage(message, stream))) :
-        (message.type === 'tool_call' ?
-          remoteControlQueue.then(() => handleRemoteMessage(message, stream)) :
-          handleRemoteMessage(message, stream));
-      void task.catch(async error => {
-        log(error);
-        await stream.send({ type: 'error', message: error instanceof Error ? error.message : String(error) }).catch(() => {});
-        stream.close();
-      });
-    });
-    stream.on('close', () => disconnectRemote(stream));
-    void stream.send({ type: 'hello', protocol: 2, capabilityVersion, agentVersion, bridgeVersion,
-      platform: 'darwin', instanceId: config.instanceId,
-      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] })
-        .then(() => sendStatus()).catch(error => log(error));
-  },
-  onDisconnect: details => log(`SSH disconnected: ${JSON.stringify(details)}`),
-  onError: error => log(error),
-  onLog: message => message && log(message),
-});
-supervisor.start();
+for (const worker of config.workers)
+  startWorkerConnection(worker);
 
 const statusTimer = setInterval(() => void sendStatus().catch(error => log(error)), 30_000);
 const heartbeatTimer = setInterval(() => {
-  const stream = remoteStream;
-  if (!stream)
-    return;
-  if (Date.now() - lastRemoteMessageAt > 45_000)
-    return stream.close();
-  void stream.send({ type: 'ping', at: Date.now() }).catch(() => stream.close());
+  for (const connection of workerConnections.values()) {
+    const stream = connection.stream;
+    if (!stream)
+      continue;
+    if (Date.now() - connection.lastRemoteMessageAt > 45_000) {
+      stream.close();
+      continue;
+    }
+    void stream.send({ type: 'ping', at: Date.now() }).catch(() => stream.close());
+  }
 }, 15_000);
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.on(signal, () => void shutdown());
+
+function startWorkerConnection(worker: WorkerConfig) {
+  let supervisor!: SSHSupervisor;
+  const connection = {} as WorkerConnection;
+  connection.id = worker.id;
+  connection.worker = worker;
+  connection.generation = '';
+  connection.sessions = new Set();
+  connection.services = new Set();
+  connection.status = 'connecting';
+  connection.lastRemoteMessageAt = Date.now();
+  connection.remoteControlQueue = Promise.resolve();
+  connection.serviceTunnels = new ServiceTunnels({ ssh: worker.ssh }, (serviceId, activeConnections) => {
+    void connection.stream?.send({
+      type: 'service_activity', generation: connection.generation, serviceId, activeConnections,
+    }).catch(error => logWorker(connection, error));
+  }, message => message && logWorker(connection, message));
+  supervisor = new SSHSupervisor({ ssh: worker.ssh }, {
+    onConnection: stream => {
+      connection.generation = '';
+      connection.stream = stream;
+      connection.status = 'connected';
+      connection.lastError = undefined;
+      connection.lastConnectedAt = new Date().toISOString();
+      connection.lastRemoteMessageAt = Date.now();
+      connection.remoteControlQueue = Promise.resolve();
+      stream.on('message', message => {
+        if (connection.stream !== stream)
+          return;
+        const ordered = ['welcome', 'session_open', 'session_finalize', 'service_open',
+          'service_close', 'service_reset'].includes(message.type);
+        const task = ordered ?
+          (connection.remoteControlQueue = connection.remoteControlQueue.then(() =>
+            handleRemoteMessage(message, connection, stream))) :
+          (message.type === 'tool_call' ?
+            connection.remoteControlQueue.then(() => handleRemoteMessage(message, connection, stream)) :
+            handleRemoteMessage(message, connection, stream));
+        void task.catch(async error => {
+          logWorker(connection, error);
+          await stream.send({ type: 'error', message: error instanceof Error ? error.message : String(error) }).catch(() => {});
+          stream.close();
+        });
+      });
+      stream.on('close', () => disconnectWorker(connection, stream));
+      void stream.send({ type: 'hello', protocol: 2, capabilityVersion, agentVersion, bridgeVersion,
+        platform: 'darwin', instanceId: config.instanceId,
+        capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] })
+          .then(() => sendStatus(connection)).catch(error => logWorker(connection, error));
+    },
+    onDisconnect: details => {
+      connection.status = connection.stream ? 'disconnected' : 'connecting';
+      logWorker(connection, `SSH disconnected: ${JSON.stringify(details)}`);
+    },
+    onError: error => {
+      connection.lastError = error instanceof Error ? error.message : String(error);
+      logWorker(connection, error);
+    },
+    onLog: message => message && logWorker(connection, message),
+  });
+  connection.supervisor = supervisor;
+  workerConnections.set(connection.id, connection);
+  supervisor.start();
+}
+
+function logWorker(connection: WorkerConnection, value: unknown) {
+  log(`[worker=${connection.id}] ${value instanceof Error ? value.stack || value.message : value}`);
+}
 
 async function restartRelay() {
   if (restartingRelay)
@@ -176,13 +241,18 @@ async function restartRelay() {
     await sendStatus().catch(error => log(error));
     const interruptedSessions = browserExecutor?.sessionIds() || [];
     for (const sessionId of interruptedSessions) {
-      await remoteStream?.send({
+      await sessionOwners.get(sessionId)?.stream?.send({
         type: 'session_interrupted',
         sessionId,
         reason: 'Desktop Browser Agent connection was reset',
       }).catch(() => {});
     }
     await stopBrowserExecutor(true);
+    for (const connection of workerConnections.values()) {
+      for (const sessionId of connection.sessions)
+        sessionOwners.delete(sessionId);
+      connection.sessions.clear();
+    }
     if (relaySession) {
       relaySession.relay.stop();
       await closeServer(relaySession.server);
@@ -190,8 +260,10 @@ async function restartRelay() {
     const server = http.createServer();
     await listen(server, config.proxyPort);
     const relay = new CDPRelayServer(server, 'chrome');
-    const downloads = new DownloadRelay(relay, () => remoteStream,
-        () => browserExecutor?.currentSessionId() || '');
+    const downloads = new DownloadRelay(relay, () => {
+      const sessionId = browserExecutor?.currentSessionId() || '';
+      return sessionOwners.get(sessionId)?.stream;
+    }, () => browserExecutor?.currentSessionId() || '');
     relay.setDelegate({
       onExtensionEvent: (method, params) => {
         downloads.onExtensionEvent(method, params);
@@ -230,13 +302,15 @@ async function restartRelay() {
   return await restartingRelay;
 }
 
-async function handleRemoteMessage(message, stream) {
-  if (remoteStream !== stream)
+async function handleRemoteMessage(message, connection: WorkerConnection, stream = connection.stream) {
+  if (connection.stream !== stream)
     return;
-  lastRemoteMessageAt = Date.now();
-  if (toolArtifacts.handleMessage(message))
+  if (!stream)
     return;
-  if (relaySession?.downloads.handleAgentMessage(message))
+  connection.lastRemoteMessageAt = Date.now();
+  if (toolArtifacts.handleMessage(message, stream))
+    return;
+  if (relaySession?.downloads.handleAgentMessage(message, stream))
     return;
   switch (message.type) {
     case 'welcome':
@@ -247,7 +321,8 @@ async function handleRemoteMessage(message, stream) {
           !['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels']
               .every(value => message.capabilities.includes(value)))
         throw new Error('Worker Browser Agent protocol is incompatible');
-      remoteGeneration = message.generation;
+      connection.generation = message.generation;
+      connection.status = 'connected';
       break;
     case 'ping':
       await stream.send({ type: 'pong', at: message.at });
@@ -255,43 +330,83 @@ async function handleRemoteMessage(message, stream) {
     case 'pong':
       break;
     case 'session_open':
-      assertGeneration(message);
+      assertGeneration(connection, message);
+      claimSession(connection, message);
       await (await ensureExecutor()).openSession(message);
       break;
     case 'session_finalize':
-      assertGeneration(message);
-      if (browserExecutor) {
-        await browserExecutor.finalizeSession(String(message.sessionId || ''));
-        await stopBrowserExecutor(false);
-      }
+      assertGeneration(connection, message);
+      await finalizeOwnedSession(connection, String(message.sessionId || ''));
       break;
     case 'tool_call':
-      assertGeneration(message);
-      void executeRemoteTool(message, stream);
+      assertGeneration(connection, message);
+      assertSessionOwner(connection, message);
+      void executeRemoteTool(message, connection);
       break;
     case 'tool_cancel':
-      assertGeneration(message);
+      assertGeneration(connection, message);
+      assertSessionOwner(connection, message);
       browserExecutor?.cancel(message);
       break;
     case 'service_open':
-      assertGeneration(message);
-      await handleServiceOpen(message, stream);
+      assertGeneration(connection, message);
+      await handleServiceOpen(message, connection);
       break;
     case 'service_close':
-      assertGeneration(message);
-      await handleServiceClose(message, stream);
+      assertGeneration(connection, message);
+      await handleServiceClose(message, connection);
       break;
     case 'service_reset':
-      assertGeneration(message);
-      await serviceTunnels.closeAll();
+      assertGeneration(connection, message);
+      await connection.serviceTunnels.closeAll();
+      for (const serviceId of connection.services)
+        serviceOwners.delete(serviceId);
+      connection.services.clear();
       break;
   }
 }
 
-async function handleServiceOpen(message, stream) {
+function claimSession(connection: WorkerConnection, message) {
+  const sessionId = String(message.sessionId || '');
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId))
+    throw new Error('Invalid browser session ID');
+  if (sessionOwners.has(sessionId))
+    throw new Error('Browser session ID is already owned by another connection');
+  sessionOwners.set(sessionId, connection);
+  connection.sessions.add(sessionId);
+}
+
+function assertSessionOwner(connection: WorkerConnection, message) {
+  const sessionId = String(message.sessionId || '');
+  if (sessionOwners.get(sessionId) !== connection)
+    throw new Error('Browser session belongs to another Worker connection');
+}
+
+async function finalizeOwnedSession(connection: WorkerConnection, sessionId: string) {
+  if (sessionOwners.get(sessionId) !== connection)
+    return;
+  sessionOwners.delete(sessionId);
+  connection.sessions.delete(sessionId);
   try {
-    const endpointPort = await serviceTunnels.open(String(message.serviceId || ''),
+    await browserExecutor?.finalizeSession(sessionId);
+  } finally {
+    await stopBrowserExecutor(false);
+  }
+}
+
+async function handleServiceOpen(message, connection: WorkerConnection) {
+  const stream = connection.stream;
+  if (!stream)
+    return;
+  try {
+    const serviceId = String(message.serviceId || '');
+    const existingOwner = serviceOwners.get(serviceId);
+    if (existingOwner && existingOwner !== connection)
+      throw new Error('Service tunnel belongs to another Worker connection');
+    const endpointPort = await connection.serviceTunnels.open(serviceId,
         Number(message.targetPort));
+    serviceOwners.set(serviceId, connection);
+    connection.services.add(serviceId);
     await stream.send({
       type: 'service_result', requestId: message.requestId,
       serviceId: message.serviceId, endpointPort,
@@ -305,9 +420,17 @@ async function handleServiceOpen(message, stream) {
   }
 }
 
-async function handleServiceClose(message, stream) {
+async function handleServiceClose(message, connection: WorkerConnection) {
+  const stream = connection.stream;
+  if (!stream)
+    return;
   try {
-    await serviceTunnels.close(String(message.serviceId || ''));
+    const serviceId = String(message.serviceId || '');
+    if (serviceOwners.get(serviceId) !== connection)
+      throw new Error('Service tunnel belongs to another Worker connection');
+    await connection.serviceTunnels.close(serviceId);
+    serviceOwners.delete(serviceId);
+    connection.services.delete(serviceId);
     await stream.send({
       type: 'service_result', requestId: message.requestId, serviceId: message.serviceId,
     });
@@ -320,16 +443,19 @@ async function handleServiceClose(message, stream) {
   }
 }
 
-async function executeRemoteTool(message, stream) {
+async function executeRemoteTool(message, connection: WorkerConnection) {
+  const stream = connection.stream;
   const startedAt = performance.now();
   let executor: BrowserExecutor | undefined;
   try {
+    if (!isCurrentConnection(connection, message))
+      return;
     executor = await ensureExecutor();
     const executed = await executor.callTool(message);
-    if (remoteStream !== stream || message.generation !== remoteGeneration)
+    if (!isCurrentConnection(connection, message))
       return;
     const result = await toolArtifacts.externalize(stream, message, executed.result);
-    if (remoteStream !== stream || message.generation !== remoteGeneration)
+    if (!isCurrentConnection(connection, message))
       return;
     await stream.send({
       type: 'tool_result',
@@ -339,12 +465,10 @@ async function executeRemoteTool(message, stream) {
       timings: { ...executed.timings,
         agentTotalMs: Math.round((performance.now() - startedAt) * 100) / 100 },
     });
-    if (executed.result?.isClose) {
-      const metadataUnavailable = JSON.stringify(executed.result).includes('BROWSER_METADATA_UNAVAILABLE');
-      await stopBrowserExecutor(true, executor, metadataUnavailable);
-    }
+    if (executed.result?.isClose)
+      await finalizeOwnedSession(connection, String(message.sessionId || ''));
   } catch (error) {
-    if (remoteStream !== stream)
+    if (!isCurrentConnection(connection, message))
       return;
     const errorMessage = error instanceof Error ? error.message : String(error);
     const interrupted = errorMessage.includes('BROWSER_CONTROL_INTERRUPTED');
@@ -368,7 +492,7 @@ async function executeRemoteTool(message, stream) {
       timings: { agentTotalMs: Math.round((performance.now() - startedAt) * 100) / 100 },
     }).catch(() => {});
     if (metadataUnavailable)
-      await stopBrowserExecutor(true, executor, true);
+      await finalizeOwnedSession(connection, String(message.sessionId || ''));
   }
 }
 
@@ -378,7 +502,8 @@ async function handleTakeover(params) {
   if (!sessionId)
     return;
   const kind = String(details.kind || 'input');
-  browserExecutor?.interruptActiveCall(sessionId, `Browser control yielded to the user (${kind})`);
+  if (sessionOwners.has(sessionId))
+    browserExecutor?.interruptActiveCall(sessionId, `Browser control yielded to the user (${kind})`);
 }
 
 async function ensureExecutor(): Promise<BrowserExecutor> {
@@ -421,67 +546,66 @@ function queueBrowserExecutorLifecycle<T>(callback: () => T | Promise<T>): Promi
   return result;
 }
 
-function assertGeneration(message) {
-  if (!remoteGeneration || message.generation !== remoteGeneration)
+function isCurrentConnection(connection: WorkerConnection, message): boolean {
+  return Boolean(connection.stream) && connection.generation !== '' &&
+    message.generation === connection.generation &&
+    sessionOwners.get(String(message.sessionId || '')) === connection;
+}
+
+function assertGeneration(connection: WorkerConnection, message) {
+  if (!connection.generation || message.generation !== connection.generation)
     throw new Error('Browser Agent generation is stale');
 }
 
-async function sendStatus() {
-  await remoteStream?.send({ type: 'status', agentVersion, ...extensionStatus,
-    connected: extensionStatus.connected && relayConnected });
+async function sendStatus(connection?: WorkerConnection) {
+  const payload = { type: 'status', agentVersion, ...extensionStatus,
+    connected: extensionStatus.connected && relayConnected };
+  if (connection) {
+    await connection.stream?.send(payload);
+    return;
+  }
+  await Promise.all([...workerConnections.values()].map(item =>
+    item.stream?.send(payload).catch(error => logWorker(item, error))));
 }
 
-function disconnectRemote(stream) {
-  if (remoteStream !== stream)
+async function disconnectWorker(connection: WorkerConnection, stream) {
+  if (connection.stream !== stream)
     return;
-  remoteStream = undefined;
-  remoteGeneration = '';
-  lastRemoteMessageAt = 0;
-  relaySession?.downloads.failPending(new Error('Worker Browser Agent disconnected'));
-  toolArtifacts.failPending(new Error('Worker Browser Agent disconnected'));
-  void restartRelay().catch(error => log(error));
+  connection.stream = undefined;
+  connection.generation = '';
+  connection.lastRemoteMessageAt = 0;
+  connection.status = 'disconnected';
+  const reason = new Error(`Worker ${connection.id} Browser Agent disconnected`);
+  relaySession?.downloads.failPending(reason, stream);
+  toolArtifacts.failPending(reason, stream);
+  const sessions = [...connection.sessions];
+  for (const sessionId of sessions) {
+    sessionOwners.delete(sessionId);
+    connection.sessions.delete(sessionId);
+    await stream.send({ type: 'session_interrupted', sessionId,
+      reason: reason.message }).catch(() => {});
+    await browserExecutor?.finalizeSession(sessionId).catch(error => logWorker(connection, error));
+  }
+  const services = [...connection.services];
+  connection.services.clear();
+  for (const serviceId of services)
+    serviceOwners.delete(serviceId);
+  await connection.serviceTunnels.closeAll().catch(error => logWorker(connection, error));
+  await stopBrowserExecutor(false);
+  logWorker(connection, 'Worker connection cleaned up');
 }
 
 async function shutdown() {
   clearInterval(statusTimer);
   clearInterval(heartbeatTimer);
-  supervisor.stop();
-  await serviceTunnels.closeAll();
+  for (const connection of workerConnections.values()) {
+    connection.supervisor.stop();
+    await connection.serviceTunnels.closeAll();
+  }
   await stopBrowserExecutor(true);
   relaySession?.relay.stop();
   await Promise.all([closeServer(relaySession?.server), closeServer(publicServer)]);
   process.exit(0);
-}
-
-function validateConfig(value) {
-  const required = ['extensionId', 'extensionToken', 'extensionCrxPath', 'instanceId'];
-  for (const name of required) {
-    if (typeof value[name] !== 'string' || !value[name])
-      throw new Error(`Browser Agent config is missing ${name}`);
-  }
-  if (!value.ssh || typeof value.ssh.host !== 'string' || typeof value.ssh.user !== 'string' ||
-      typeof value.ssh.identityFile !== 'string' || typeof value.ssh.knownHostsFile !== 'string')
-    throw new Error('Browser Agent SSH config is invalid');
-  if (!/^[a-p]{32}$/.test(value.extensionId) || !/^[a-f0-9]{64}$/.test(value.extensionToken) ||
-      !/^[0-9a-f-]{36}$/i.test(value.instanceId))
-    throw new Error('Browser Agent identity config is invalid');
-  if (!path.isAbsolute(value.extensionCrxPath) || !path.isAbsolute(value.ssh.identityFile) ||
-      !path.isAbsolute(value.ssh.knownHostsFile) || !/^[A-Za-z0-9_.:-]+$/.test(value.ssh.host) ||
-      value.ssh.host.startsWith('-') || !/^[A-Za-z0-9._-]+$/.test(value.ssh.user))
-    throw new Error('Browser Agent path or SSH target is invalid');
-  value.ssh.port = validPort(value.ssh.port, 22);
-  value.publicPort = validPort(value.publicPort, 8931);
-  value.proxyPort = validPort(value.proxyPort, 8932);
-  if (value.publicPort === value.proxyPort)
-    throw new Error('Browser Agent public and proxy ports must differ');
-  return value;
-}
-
-function validPort(value, fallback) {
-  const port = Number(value || fallback);
-  if (!Number.isInteger(port) || port < 1 || port > 65535)
-    throw new Error(`Browser Agent port is invalid: ${value}`);
-  return port;
 }
 
 function authorized(header, token) {
